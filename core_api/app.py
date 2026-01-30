@@ -59,7 +59,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await manager.start_heartbeat(interval=30)
     print("WebSocket heartbeat started (30s interval)")
 
+    # Start SSE-to-WebSocket bridge
+    from .bridge import bridge
+    await bridge.start()
+    print("SSE-to-WebSocket bridge started")
+
     yield
+
+    # Shutdown: Stop bridge
+    await bridge.stop()
 
     # Shutdown: Close socket connections
     await app.state.mojo_compute.close()
