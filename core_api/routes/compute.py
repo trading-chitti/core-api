@@ -25,6 +25,14 @@ class RSIRequest(BaseModel):
     period: int = Field(14, ge=2, le=100)
 
 
+class EMARequest(BaseModel):
+    """Request model for EMA calculation."""
+
+    symbol: str = Field(..., min_length=1, max_length=20)
+    prices: List[float] = Field(..., min_length=1, max_length=1_000_000)
+    period: int = Field(..., ge=2, le=500)
+
+
 class MACDRequest(BaseModel):
     """Request model for MACD calculation."""
 
@@ -65,6 +73,21 @@ async def compute_rsi(request_model: RSIRequest, request: Request):
     try:
         client = request.app.state.mojo_compute
         response = await client.compute_rsi(
+            symbol=request_model.symbol,
+            prices=request_model.prices,
+            period=request_model.period,
+        )
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Mojo compute error: {str(e)}")
+
+
+@router.post("/ema")
+async def compute_ema(request_model: EMARequest, request: Request):
+    """Calculate Exponential Moving Average via mojo-compute."""
+    try:
+        client = request.app.state.mojo_compute
+        response = await client.compute_ema(
             symbol=request_model.symbol,
             prices=request_model.prices,
             period=request_model.period,

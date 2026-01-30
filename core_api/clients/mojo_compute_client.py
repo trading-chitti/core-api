@@ -50,6 +50,27 @@ class MojoComputeClient(MojoSocketClient):
         }
         return await self.send_request(request)
 
+    async def compute_ema(
+        self, symbol: str, prices: List[float], period: int
+    ) -> dict:
+        """Compute Exponential Moving Average.
+
+        Args:
+            symbol: Stock symbol
+            prices: List of closing prices
+            period: EMA period
+
+        Returns:
+            Response with EMA values
+        """
+        request = {
+            "action": "compute_ema",
+            "symbol": symbol,
+            "prices": prices,
+            "period": period,
+        }
+        return await self.send_request(request)
+
     async def compute_macd(
         self,
         symbol: str,

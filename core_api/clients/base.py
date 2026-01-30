@@ -60,35 +60,42 @@ class MojoSocketClient:
             ConnectionError: If not connected or connection fails
             ValueError: If response is not valid JSON
         """
-        if not self.sock:
-            await self.connect()
+        # Always create a new connection for each request
+        # (Server closes connection after each response)
+        await self.close()
+        await self.connect()
 
-        # Serialize request to JSON
-        request_json = json.dumps(request)
-        request_bytes = request_json.encode("utf-8")
+        try:
+            # Serialize request to JSON
+            request_json = json.dumps(request)
+            request_bytes = request_json.encode("utf-8")
 
-        # Send length prefix (4 bytes) + request
-        length = len(request_bytes)
-        length_bytes = length.to_bytes(4, byteorder="big")
+            # Send length prefix (4 bytes) + request
+            length = len(request_bytes)
+            length_bytes = length.to_bytes(4, byteorder="big")
 
-        await asyncio.get_event_loop().run_in_executor(
-            None, self.sock.sendall, length_bytes + request_bytes
-        )
+            await asyncio.get_event_loop().run_in_executor(
+                None, self.sock.sendall, length_bytes + request_bytes
+            )
 
-        # Receive length prefix (4 bytes)
-        length_bytes = await asyncio.get_event_loop().run_in_executor(
-            None, self._recv_exact, 4
-        )
-        response_length = int.from_bytes(length_bytes, byteorder="big")
+            # Receive length prefix (4 bytes)
+            length_bytes = await asyncio.get_event_loop().run_in_executor(
+                None, self._recv_exact, 4
+            )
+            response_length = int.from_bytes(length_bytes, byteorder="big")
 
-        # Receive response
-        response_bytes = await asyncio.get_event_loop().run_in_executor(
-            None, self._recv_exact, response_length
-        )
+            # Receive response
+            response_bytes = await asyncio.get_event_loop().run_in_executor(
+                None, self._recv_exact, response_length
+            )
 
-        # Deserialize JSON response
-        response_json = response_bytes.decode("utf-8")
-        return json.loads(response_json)
+            # Deserialize JSON response
+            response_json = response_bytes.decode("utf-8")
+            return json.loads(response_json)
+
+        finally:
+            # Close connection after each request
+            await self.close()
 
     def _recv_exact(self, num_bytes: int) -> bytes:
         """Receive exactly num_bytes from socket.
