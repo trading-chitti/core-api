@@ -2,7 +2,7 @@
 name = "trading-chitti-core-api"
 version = "0.1.0"
 description = "API Gateway - Routes dashboard requests to Mojo services"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
@@ -29,8 +29,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py39"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.9"
 strict = true
