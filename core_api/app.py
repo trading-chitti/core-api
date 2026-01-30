@@ -1,0 +1,172 @@
+"""Core API Gateway - Routes requests to Mojo services.
+
+This is a thin FastAPI layer that handles:
+- HTTP/REST endpoints
+- SSE (Server-Sent Events) streaming
+- WebSocket connections (future)
+- Authentication & authorization
+- Request validation (Pydantic)
+- Response serialization
+
+It does NOT contain business logic - just routes to Mojo services via Unix sockets.
+"""
+
+from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import AsyncGenerator
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from prometheus_client import Counter, Histogram, make_asgi_app
+
+from .clients.mojo_compute_client import MojoComputeClient
+from .clients.signal_service_client import SignalServiceClient
+from .clients.news_nlp_client import NewsNLPClient
+from .config import settings
+
+# Prometheus metrics
+requests_total = Counter(
+    "core_api_requests_total",
+    "Total API requests",
+    ["method", "endpoint", "status"],
+)
+request_duration = Histogram(
+    "core_api_request_duration_seconds",
+    "Request duration in seconds",
+    ["method", "endpoint"],
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Startup and shutdown events."""
+    # Startup: Initialize socket clients
+    app.state.mojo_compute = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)
+    app.state.signal_service = SignalServiceClient(settings.SIGNAL_SERVICE_SOCKET)
+    app.state.news_nlp = NewsNLPClient(settings.NEWS_NLP_SOCKET)
+
+    # Test connections
+    try:
+        await app.state.mojo_compute.ping()
+        await app.state.signal_service.ping()
+        await app.state.news_nlp.ping()
+    except Exception as e:
+        print(f"Warning: Could not connect to all Mojo services: {e}")
+
+    yield
+
+    # Shutdown: Close socket connections
+    await app.state.mojo_compute.close()
+    await app.state.signal_service.close()
+    await app.state.news_nlp.close()
+
+
+# Create FastAPI app
+app = FastAPI(
+    title="Trading-Chitti Core API",
+    description="API Gateway routing to Mojo services for maximum performance",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# CORS middleware (allow dashboard to connect)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Add Prometheus metrics endpoint
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
+
+
+def now_iso() -> str:
+    """Return current timestamp in ISO format."""
+    return datetime.utcnow().isoformat() + "Z"
+
+
+@app.get("/health")
+async def health_check():
+    """Check health of API gateway and all Mojo services."""
+    services_status = {}
+
+    # Check mojo-compute
+    try:
+        await app.state.mojo_compute.ping()
+        services_status["mojo-compute"] = "healthy"
+    except Exception as e:
+        services_status["mojo-compute"] = f"unhealthy: {str(e)}"
+
+    # Check signal-service
+    try:
+        await app.state.signal_service.ping()
+        services_status["signal-service"] = "healthy"
+    except Exception as e:
+        services_status["signal-service"] = f"unhealthy: {str(e)}"
+
+    # Check news-nlp
+    try:
+        await app.state.news_nlp.ping()
+        services_status["news-nlp"] = "healthy"
+    except Exception as e:
+        services_status["news-nlp"] = f"unhealthy: {str(e)}"
+
+    all_healthy = all(status == "healthy" for status in services_status.values())
+
+    return JSONResponse(
+        status_code=200 if all_healthy else 503,
+        content={
+            "status": "healthy" if all_healthy else "degraded",
+            "services": services_status,
+            "timestamp": now_iso(),
+        },
+    )
+
+
+@app.get("/")
+async def root():
+    """Root endpoint with API info."""
+    return {
+        "name": "Trading-Chitti Core API",
+        "version": "0.1.0",
+        "description": "API Gateway to Mojo services",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
+# Import and include routers (defined in separate files)
+from .routes import compute, signals, news  # noqa: E402
+
+app.include_router(compute.router, prefix="/api/compute", tags=["Compute"])
+app.include_router(signals.router, prefix="/api/signals", tags=["Signals"])
+app.include_router(news.router, prefix="/api/news", tags=["News"])
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Global exception handler for unhandled errors."""
+    requests_total.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status="error",
+    ).inc()
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_server_error",
+            "message": str(exc),
+            "timestamp": now_iso(),
+        },
+    )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=6001)
