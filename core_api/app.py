@@ -54,6 +54,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         print(f"Warning: Could not connect to all Mojo services: {e}")
 
+    # Start WebSocket heartbeat
+    from .websocket import manager
+    await manager.start_heartbeat(interval=30)
+    print("WebSocket heartbeat started (30s interval)")
+
     yield
 
     # Shutdown: Close socket connections
@@ -140,11 +145,12 @@ async def root():
 
 
 # Import and include routers (defined in separate files)
-from .routes import compute, signals, news  # noqa: E402
+from .routes import compute, signals, news, ws  # noqa: E402
 
 app.include_router(compute.router, prefix="/api/compute", tags=["Compute"])
 app.include_router(signals.router, prefix="/api/signals", tags=["Signals"])
 app.include_router(news.router, prefix="/api/news", tags=["News"])
+app.include_router(ws.router, tags=["WebSocket"])
 
 
 @app.exception_handler(Exception)
