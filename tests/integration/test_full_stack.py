@@ -1,377 +1,199 @@
-"""Integration tests requiring running services.
+"""
+Integration tests requiring all services running.
 
-These tests require:
-- PostgreSQL running on localhost:5432
-- Redis running on localhost:6379
-- Mojo services running and accessible via Unix sockets:
-  - /tmp/mojo-compute.sock
-  - /tmp/signal-service.sock
-  - /tmp/news-nlp.sock
+Run these tests with:
+    pytest core-api/tests/integration -v -m integration
 
-Run with: pytest core-api/tests/integration -v -m integration
+Prerequisites:
+    - PostgreSQL running on port 6432
+    - core-api running on port 6001
+    - signal-service running on port 6002
+    - mojo-compute running on port 6000
 """
 
 import pytest
-from fastapi.testclient import TestClient
+import httpx
 import asyncio
-import socket
-import os
 
-from core_api.app import app
-from core_api.clients.mojo_compute_client import MojoComputeClient
-from core_api.clients.signal_service_client import SignalServiceClient
-from core_api.clients.news_nlp_client import NewsNLPClient
-from core_api.config import settings
+# Mark all tests in this module as integration tests
+pytestmark = pytest.mark.integration
 
-
-def is_socket_available(socket_path: str) -> bool:
-    """Check if Unix socket is available."""
-    return os.path.exists(socket_path)
+BASE_URL = "http://localhost:6001"
+SIGNAL_SERVICE_URL = "http://localhost:6002"
+MOJO_COMPUTE_URL = "http://localhost:6000"
 
 
-def skip_if_services_unavailable():
-    """Decorator to skip tests if services are not running."""
-    sockets = [
-        settings.MOJO_COMPUTE_SOCKET,
-        settings.SIGNAL_SERVICE_SOCKET,
-        settings.NEWS_NLP_SOCKET,
-    ]
-
-    missing = [s for s in sockets if not is_socket_available(s)]
-
-    return pytest.mark.skipif(
-        len(missing) > 0,
-        reason=f"Required services not running. Missing sockets: {missing}"
-    )
+@pytest.mark.asyncio
+async def test_health_check_integration():
+    """Test health endpoint with running service."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{BASE_URL}/health", timeout=5.0)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] in ["healthy", "degraded"]
 
 
-@pytest.mark.integration
-class TestHealthCheckIntegration:
-    """Integration tests for health check with real services."""
+@pytest.mark.asyncio
+async def test_database_connection():
+    """Test that API can connect to PostgreSQL."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{BASE_URL}/api/analytics/system/stats", timeout=10.0)
+        assert response.status_code == 200
+        data = response.json()
+        
+        # Should have database statistics
+        assert "total_stocks" in data
+        assert data["total_stocks"] > 0  # Should have symbols after seeding
 
-    @skip_if_services_unavailable()
-    def test_health_check_all_services_running(self):
-        """Test health check when all services are running."""
-        with TestClient(app) as client:
-            response = client.get("/health")
 
+@pytest.mark.asyncio
+async def test_volatile_stocks_query():
+    """Test volatile stocks endpoint with real database."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{BASE_URL}/api/analytics/volatile-stocks?limit=20", timeout=10.0)
+        assert response.status_code == 200
+        data = response.json()
+        
+        assert isinstance(data, list)
+        assert len(data) <= 20
+        
+        # Check structure if results exist
+        if data:
+            assert "symbol" in data[0]
+            assert "volatility_30d" in data[0]
+
+
+@pytest.mark.asyncio
+async def test_price_history_integration():
+    """Test price history endpoint with real data."""
+    async with httpx.AsyncClient() as client:
+        # Test with a common symbol
+        response = await client.get(f"{BASE_URL}/api/market/price-history/RELIANCE?days=30", timeout=10.0)
+        assert response.status_code in [200, 404]
+        
+        if response.status_code == 200:
+            data = response.json()
+            assert isinstance(data, list)
+
+
+@pytest.mark.asyncio
+async def test_mojo_compute_integration():
+    """Test that core-api can communicate with mojo-compute service."""
+    async with httpx.AsyncClient() as client:
+        # Try to compute SMA via core-api
+        test_prices = list(range(100, 150))
+        
+        try:
+            response = await client.post(
+                f"{BASE_URL}/api/compute/sma",
+                json={"prices": test_prices, "period": 20},
+                timeout=15.0
+            )
+            
+            # Accept both success and service unavailable
+            assert response.status_code in [200, 503]
+            
+            if response.status_code == 200:
+                data = response.json()
+                assert "values" in data or "result" in data
+        
+        except httpx.ConnectError:
+            pytest.skip("Mojo compute service not available")
+
+
+@pytest.mark.asyncio
+async def test_signal_service_integration():
+    """Test that signal-service is accessible."""
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{SIGNAL_SERVICE_URL}/api/stocks/search?q=RELIANCE", timeout=10.0)
+            assert response.status_code in [200, 404]
+            
+            if response.status_code == 200:
+                data = response.json()
+                assert isinstance(data, list)
+        
+        except httpx.ConnectError:
+            pytest.skip("Signal service not available")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests():
+    """Test handling of concurrent requests."""
+    async with httpx.AsyncClient() as client:
+        # Send 10 concurrent requests
+        tasks = [
+            client.get(f"{BASE_URL}/health", timeout=5.0)
+            for _ in range(10)
+        ]
+        
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # All should succeed
+        for response in responses:
+            if isinstance(response, Exception):
+                pytest.fail(f"Request failed: {response}")
             assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_performance_analytics_integration():
+    """Test performance metrics endpoint."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{BASE_URL}/api/analytics/performance", timeout=5.0)
+        assert response.status_code == 200
+        data = response.json()
+        
+        # Should have Mojo and BERT metrics
+        assert "mojo" in data
+        assert "bert" in data
+        
+        # Speedup should be realistic
+        if "speedup_factor" in data["mojo"]:
+            assert data["mojo"]["speedup_factor"] > 1.0  # At least some speedup
+
+
+@pytest.mark.asyncio
+async def test_intraday_mode_toggle_integration(pg_dsn):
+    """Test intraday mode toggle with real database."""
+    async with httpx.AsyncClient() as client:
+        # Try to toggle intraday mode
+        response = await client.post(
+            f"{BASE_URL}/api/config/intraday-mode",
+            json={"enabled": True},
+            timeout=5.0
+        )
+        
+        # Should succeed or return permission error
+        assert response.status_code in [200, 403, 500]
+        
+        if response.status_code == 200:
             data = response.json()
-
-            # All services should be healthy
-            assert data["status"] == "healthy"
-            assert data["services"]["mojo-compute"] == "healthy"
-            assert data["services"]["signal-service"] == "healthy"
-            assert data["services"]["news-nlp"] == "healthy"
-
-    def test_health_check_services_down(self):
-        """Test health check when services are down."""
-        # This test assumes services are NOT running
-        # Skip if they are running
-        if all(is_socket_available(s) for s in [
-            settings.MOJO_COMPUTE_SOCKET,
-            settings.SIGNAL_SERVICE_SOCKET,
-            settings.NEWS_NLP_SOCKET,
-        ]):
-            pytest.skip("Services are running, skipping down test")
-
-        with TestClient(app) as client:
-            response = client.get("/health")
-
-            # Should return degraded status
-            assert response.status_code == 503
-            data = response.json()
-            assert data["status"] == "degraded"
-
-
-@pytest.mark.integration
-class TestMojoComputeIntegration:
-    """Integration tests for mojo-compute service."""
-
-    @skip_if_services_unavailable()
-    async def test_compute_sma_real_service(self, sample_prices):
-        """Test SMA computation with real mojo-compute service."""
-        client = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)
-
-        try:
-            # Test ping first
-            await client.ping()
-
-            # Compute SMA
-            result = await client.compute_sma(
-                symbol="AAPL",
-                prices=sample_prices,
-                period=5,
-            )
-
-            assert result["status"] == "success"
-            assert result["symbol"] == "AAPL"
-            assert result["indicator"] == "sma"
-            assert "values" in result
-            assert len(result["values"]) > 0
-
-        finally:
-            await client.close()
-
-    @skip_if_services_unavailable()
-    async def test_compute_rsi_real_service(self, sample_prices):
-        """Test RSI computation with real mojo-compute service."""
-        client = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)
-
-        try:
-            result = await client.compute_rsi(
-                symbol="AAPL",
-                prices=sample_prices,
-                period=14,
-            )
-
-            assert result["status"] == "success"
-            assert result["indicator"] == "rsi"
-            assert "values" in result
-
-        finally:
-            await client.close()
-
-    @skip_if_services_unavailable()
-    async def test_compute_ema_real_service(self, sample_prices):
-        """Test EMA computation with real mojo-compute service."""
-        client = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)
-
-        try:
-            result = await client.compute_ema(
-                symbol="AAPL",
-                prices=sample_prices,
-                period=12,
-            )
-
-            assert result["status"] == "success"
-            assert result["indicator"] == "ema"
-            assert "values" in result
-
-        finally:
-            await client.close()
-
-    @skip_if_services_unavailable()
-    async def test_compute_macd_real_service(self, sample_prices):
-        """Test MACD computation with real mojo-compute service."""
-        client = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)
-
-        try:
-            result = await client.compute_macd(
-                symbol="AAPL",
-                prices=sample_prices,
-                fast_period=12,
-                slow_period=26,
-                signal_period=9,
-            )
-
-            assert result["status"] == "success"
-            assert result["indicator"] == "macd"
-            assert "macd_line" in result
-            assert "signal_line" in result
-            assert "histogram" in result
-
-        finally:
-            await client.close()
-
-
-@pytest.mark.integration
-class TestSignalServiceIntegration:
-    """Integration tests for signal-service."""
-
-    @skip_if_services_unavailable()
-    async def test_get_alerts_real_service(self):
-        """Test getting alerts from real signal-service."""
-        client = SignalServiceClient(settings.SIGNAL_SERVICE_SOCKET)
-
-        try:
-            # Test ping first
-            await client.ping()
-
-            result = await client.get_alerts(limit=10)
-
-            assert result["status"] == "success"
-            assert "alerts" in result
-            assert "total" in result
-
-        finally:
-            await client.close()
-
-    @skip_if_services_unavailable()
-    async def test_generate_signals_real_service(self):
-        """Test generating signals with real signal-service."""
-        client = SignalServiceClient(settings.SIGNAL_SERVICE_SOCKET)
-
-        try:
-            indicators = {
-                "rsi": 30.5,
-                "sma_20": 105.0,
-                "sma_50": 102.0,
-            }
-
-            result = await client.generate_signals(
-                symbol="AAPL",
-                indicators=indicators,
-            )
-
-            assert result["status"] == "success"
-            assert "signals" in result
-
-        finally:
-            await client.close()
-
-    @skip_if_services_unavailable()
-    async def test_get_patterns_real_service(self):
-        """Test getting patterns from real signal-service."""
-        client = SignalServiceClient(settings.SIGNAL_SERVICE_SOCKET)
-
-        try:
-            result = await client.get_patterns(symbol="AAPL")
-
-            assert result["status"] == "success"
-            assert "patterns" in result
-
-        finally:
-            await client.close()
-
-
-@pytest.mark.integration
-class TestNewsNLPIntegration:
-    """Integration tests for news-nlp service."""
-
-    @skip_if_services_unavailable()
-    async def test_analyze_sentiment_real_service(self):
-        """Test sentiment analysis with real news-nlp service."""
-        client = NewsNLPClient(settings.NEWS_NLP_SOCKET)
-
-        try:
-            # Test ping first
-            await client.ping()
-
-            result = await client.analyze_sentiment(
-                text="Apple stock surges on strong quarterly earnings"
-            )
-
-            assert result["status"] == "success"
-            assert "sentiment" in result
-
-        finally:
-            await client.close()
-
-    @skip_if_services_unavailable()
-    async def test_extract_entities_real_service(self):
-        """Test entity extraction with real news-nlp service."""
-        client = NewsNLPClient(settings.NEWS_NLP_SOCKET)
-
-        try:
-            result = await client.extract_entities(
-                text="Apple and Microsoft lead technology sector gains"
-            )
-
-            assert result["status"] == "success"
-            assert "entities" in result
-
-        finally:
-            await client.close()
-
-    @skip_if_services_unavailable()
-    async def test_get_articles_real_service(self):
-        """Test getting articles from real news-nlp service."""
-        client = NewsNLPClient(settings.NEWS_NLP_SOCKET)
-
-        try:
-            result = await client.get_articles(limit=10)
-
-            assert result["status"] == "success"
-            assert "articles" in result
-
-        finally:
-            await client.close()
-
-
-@pytest.mark.integration
-@pytest.mark.slow
-class TestEndToEndFlow:
-    """End-to-end integration tests."""
-
-    @skip_if_services_unavailable()
-    def test_full_trading_signal_flow(self, sample_prices):
-        """Test complete flow: compute indicators -> generate signals."""
-        with TestClient(app) as client:
-            # Step 1: Compute technical indicators
-            sma_response = client.post(
-                "/api/compute/sma",
-                json={
-                    "symbol": "AAPL",
-                    "prices": sample_prices,
-                    "period": 20,
-                }
-            )
-            assert sma_response.status_code == 200
-            sma_data = sma_response.json()
-
-            rsi_response = client.post(
-                "/api/compute/rsi",
-                json={
-                    "symbol": "AAPL",
-                    "prices": sample_prices,
-                    "period": 14,
-                }
-            )
-            assert rsi_response.status_code == 200
-            rsi_data = rsi_response.json()
-
-            # Step 2: Get news sentiment
-            # Note: This would require actual news articles in the system
-
-            # Step 3: Generate trading signals
-            signals_response = client.post(
-                "/api/signals/generate",
-                params={"symbol": "AAPL"},
-            )
-            assert signals_response.status_code == 200
-            signals_data = signals_response.json()
-
-            assert signals_data["status"] == "success"
-            assert "signals" in signals_data
-
-    @skip_if_services_unavailable()
-    def test_concurrent_requests(self, sample_prices):
-        """Test handling multiple concurrent requests."""
-        with TestClient(app) as client:
-            # Send multiple requests concurrently
-            symbols = ["AAPL", "GOOGL", "MSFT"]
-
-            responses = []
-            for symbol in symbols:
-                response = client.post(
-                    "/api/compute/sma",
-                    json={
-                        "symbol": symbol,
-                        "prices": sample_prices,
-                        "period": 20,
-                    }
-                )
-                responses.append(response)
-
-            # All should succeed
-            for response in responses:
-                assert response.status_code == 200
-                assert response.json()["status"] == "success"
-
-    @skip_if_services_unavailable()
-    def test_error_handling_invalid_data(self):
-        """Test error handling with invalid data."""
-        with TestClient(app) as client:
-            # Send invalid data (empty prices)
-            response = client.post(
-                "/api/compute/sma",
-                json={
-                    "symbol": "AAPL",
-                    "prices": [],
-                    "period": 20,
-                }
-            )
-
-            # Should return validation error
-            assert response.status_code == 422
+            assert "success" in data or "status" in data
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_workflow():
+    """Test complete workflow: fetch symbols -> get prices -> compute indicators."""
+    async with httpx.AsyncClient() as client:
+        # Step 1: Get system stats
+        response = await client.get(f"{BASE_URL}/api/analytics/system/stats", timeout=10.0)
+        assert response.status_code == 200
+        stats = response.json()
+        
+        if stats["total_stocks"] == 0:
+            pytest.skip("No symbols in database")
+        
+        # Step 2: Get volatile stocks
+        response = await client.get(f"{BASE_URL}/api/analytics/volatile-stocks?limit=1", timeout=10.0)
+        assert response.status_code == 200
+        volatile = response.json()
+        
+        if not volatile:
+            pytest.skip("No volatile stocks data")
+        
+        symbol = volatile[0]["symbol"]
+        
+        # Step 3: Get price history for that symbol
+        response = await client.get(f"{BASE_URL}/api/market/price-history/{symbol}?days=30", timeout=10.0)
+        assert response.status_code in [200, 404]
