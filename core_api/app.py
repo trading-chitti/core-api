@@ -153,12 +153,16 @@ async def root():
 
 
 # Import and include routers (defined in separate files)
-from .routes import compute, signals, news, ws  # noqa: E402
+from .routes import compute, signals, news, ws, backtest, analytics, market, config  # noqa: E402
 
 app.include_router(compute.router, prefix="/api/compute", tags=["Compute"])
 app.include_router(signals.router, prefix="/api/signals", tags=["Signals"])
 app.include_router(news.router, prefix="/api/news", tags=["News"])
 app.include_router(ws.router, tags=["WebSocket"])
+app.include_router(backtest.router, tags=["Backtesting"])
+app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
+app.include_router(market.router, prefix="/api/market", tags=["Market"])
+app.include_router(config.router, prefix="/api/config", tags=["Configuration"])
 
 
 @app.exception_handler(Exception)
