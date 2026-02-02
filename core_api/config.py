@@ -41,9 +41,9 @@ class Settings(BaseSettings):
     API_PREFIX: str = "/api"
     DEBUG: bool = False
 
-    # Zerodha Kite API credentials
-    KITE_API_KEY: str = "qaynsjrv0ujhs9oc"
-    KITE_API_SECRET: str = "ngrcd2auif5n12io9qfbyka61picalyx"
+    # Zerodha Kite API credentials (must be set via environment variables)
+    KITE_API_KEY: str = ""  # Set via KITE_API_KEY env var
+    KITE_API_SECRET: str = ""  # Set via KITE_API_SECRET env var
 
 
 settings = Settings()
