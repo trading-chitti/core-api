@@ -22,20 +22,28 @@ class Settings(BaseSettings):
     MOJO_COMPUTE_PORT: int = 6004
 
     SIGNAL_SERVICE_HOST: str = "localhost"
-    SIGNAL_SERVICE_PORT: int = 6003
+    SIGNAL_SERVICE_PORT: int = 6002  # Signal-service HTTP port
 
     NEWS_NLP_HOST: str = "localhost"
     NEWS_NLP_PORT: int = 6002
 
     # Use Unix sockets or TCP
-    USE_UNIX_SOCKETS: bool = True
+    USE_UNIX_SOCKETS: bool = False  # Using HTTP for signal-service
 
     # CORS settings
-    CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:6004"  # Dashboard
+    ]
 
     # API settings
     API_PREFIX: str = "/api"
     DEBUG: bool = False
+
+    # Zerodha Kite API credentials
+    KITE_API_KEY: str = "qaynsjrv0ujhs9oc"
+    KITE_API_SECRET: str = "ngrcd2auif5n12io9qfbyka61picalyx"
 
 
 settings = Settings()

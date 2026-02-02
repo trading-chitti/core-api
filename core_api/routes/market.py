@@ -85,3 +85,74 @@ async def get_intraday_data(
         }
         for row in results
     ]
+
+
+@router.get("/indices")
+async def get_market_indices() -> List[Dict[str, Any]]:
+    """Get major market indices (NIFTY 50, SENSEX, etc.).
+
+    Returns current values and changes for major Indian market indices.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # List of major Indian indices
+    indices = [
+        ("NIFTY 50", "^NSEI"),
+        ("NIFTY BANK", "^NSEBANK"),
+        ("SENSEX", "^BSESN"),
+        ("NIFTY IT", "^CNXIT"),
+        ("NIFTY MIDCAP", "^NSEMDCP50"),
+    ]
+
+    results = []
+
+    for index_name, index_symbol in indices:
+        # Get latest and previous day's close for each index
+        cur.execute("""
+            WITH latest_data AS (
+                SELECT
+                    close,
+                    trade_date,
+                    LAG(close) OVER (ORDER BY trade_date) as prev_close
+                FROM md.eod_prices
+                WHERE symbol = %s
+                AND exchange = 'NSE'
+                ORDER BY trade_date DESC
+                LIMIT 2
+            )
+            SELECT
+                close as value,
+                COALESCE(close - prev_close, 0) as change,
+                CASE
+                    WHEN prev_close > 0 THEN ((close - prev_close) / prev_close * 100)
+                    ELSE 0
+                END as change_percent
+            FROM latest_data
+            ORDER BY trade_date DESC
+            LIMIT 1
+        """, (index_symbol,))
+
+        result = cur.fetchone()
+
+        if result:
+            results.append({
+                "index": index_name,
+                "value": round(float(result[0]) if result[0] else 0.0, 2),
+                "change": round(float(result[1]) if result[1] else 0.0, 2),
+                "changePercent": round(float(result[2]) if result[2] else 0.0, 2),
+            })
+        else:
+            # If no data, return default values
+            results.append({
+                "index": index_name,
+                "value": 0.0,
+                "change": 0.0,
+                "changePercent": 0.0,
+            })
+
+    cur.close()
+    conn.close()
+
+    # Return empty list if no data (no mock data)
+    return [r for r in results if r["value"] > 0]

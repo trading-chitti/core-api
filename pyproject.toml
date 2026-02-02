@@ -11,6 +11,7 @@ dependencies = [
     "python-multipart>=0.0.6",
     "prometheus-client>=0.19",
     "structlog>=24.1",
+    "kiteconnect>=4.0",
 ]
 
 [project.optional-dependencies]

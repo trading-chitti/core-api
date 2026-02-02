@@ -108,22 +108,12 @@ async def _run_backtest_task(run_id: str, request: BacktestRequest):
         # Update status
         backtest_runs[run_id].status = "running"
 
-        # TODO: Call mojo-compute backtesting engine
-        # For now, simulate with delay
-        await asyncio.sleep(2)
-
-        # Mock results
-        backtest_runs[run_id].metrics = {
-            "total_return": 0.15,
-            "sharpe_ratio": 1.85,
-            "sortino_ratio": 2.10,
-            "max_drawdown": -0.08,
-            "win_rate": 0.62,
-            "total_trades": 24,
-            "final_equity": request.initial_capital * 1.15
-        }
-        backtest_runs[run_id].status = "completed"
-        backtest_runs[run_id].completed_at = datetime.now()
+        # Call mojo-compute backtesting engine (not yet implemented)
+        # Raise error since backtest engine is not ready
+        raise NotImplementedError(
+            "Backtesting engine not yet implemented. "
+            "The Mojo-based backtesting engine is under development."
+        )
 
     except Exception as e:
         backtest_runs[run_id].status = "failed"

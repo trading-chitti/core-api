@@ -22,7 +22,6 @@ from prometheus_client import Counter, Histogram, make_asgi_app
 
 from .clients.mojo_compute_client import MojoComputeClient
 from .clients.signal_service_client import SignalServiceClient
-from .clients.signal_service_http_client import SignalServiceHTTPClient
 from .clients.news_nlp_client import NewsNLPClient
 from .config import settings
 
@@ -42,16 +41,10 @@ request_duration = Histogram(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup and shutdown events."""
-    # Startup: Initialize clients (socket or HTTP based on config)
-    if settings.USE_UNIX_SOCKETS:
-        app.state.mojo_compute = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)
-        app.state.signal_service = SignalServiceClient(settings.SIGNAL_SERVICE_SOCKET)
-        app.state.news_nlp = NewsNLPClient(settings.NEWS_NLP_SOCKET)
-    else:
-        # Use HTTP clients
-        app.state.mojo_compute = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)  # Keep socket for now
-        app.state.signal_service = SignalServiceHTTPClient(f"http://{settings.SIGNAL_SERVICE_HOST}:{settings.SIGNAL_SERVICE_PORT}")
-        app.state.news_nlp = NewsNLPClient(settings.NEWS_NLP_SOCKET)  # Keep socket for now
+    # Startup: Initialize socket clients
+    app.state.mojo_compute = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)
+    app.state.signal_service = SignalServiceClient(settings.SIGNAL_SERVICE_SOCKET)
+    app.state.news_nlp = NewsNLPClient(settings.NEWS_NLP_SOCKET)
 
     # Test connections
     try:
@@ -160,22 +153,7 @@ async def root():
 
 
 # Import and include routers (defined in separate files)
-from .routes import (  # noqa: E402
-    compute,
-    signals,
-    news,
-    ws,
-    backtest,
-    analytics,
-    market,
-    config,
-    zerodha_auth,
-    stocks,
-    portfolio,
-    ml,
-    watchlist,
-    sentiment,
-)
+from .routes import compute, signals, news, ws, backtest, analytics, market, config  # noqa: E402
 
 app.include_router(compute.router, prefix="/api/compute", tags=["Compute"])
 app.include_router(signals.router, prefix="/api/signals", tags=["Signals"])
@@ -185,13 +163,7 @@ app.include_router(backtest.router, tags=["Backtesting"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
 app.include_router(market.router, prefix="/api/market", tags=["Market"])
 app.include_router(config.router, prefix="/api/config", tags=["Configuration"])
-app.include_router(stocks.router, prefix="/api/stocks", tags=["Stocks"])
-app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"])
-app.include_router(ml.router, prefix="/api/ml", tags=["ML Analysis"])
-app.include_router(watchlist.router, prefix="/api/watchlist", tags=["Watchlist"])
-app.include_router(sentiment.router, prefix="/api", tags=["Sentiment"])
 
-app.include_router(zerodha_auth.router, prefix="/auth/zerodha")
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
