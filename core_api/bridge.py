@@ -101,15 +101,15 @@ class SSEBridge:
                                     logger.warning(f"Failed to parse SSE data: {e}")
 
             except httpx.HTTPError as e:
-                logger.error(f"Error connecting to alerts stream: {e}")
+                logger.warning(f"Alerts stream disconnected, retrying in 30s")
                 if self._running:
-                    # Retry after 5 seconds
-                    await asyncio.sleep(5)
+                    # Retry after 30 seconds (reduced log noise)
+                    await asyncio.sleep(30)
 
             except Exception as e:
-                logger.error(f"Unexpected error in alerts bridge: {e}")
+                logger.warning(f"Alerts bridge error, retrying in 30s")
                 if self._running:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(30)
 
     async def _bridge_activity_stream(self):
         """
@@ -145,7 +145,7 @@ class SSEBridge:
                                     logger.warning(f"Failed to parse SSE data: {e}")
 
             except httpx.HTTPError as e:
-                logger.error(f"Error connecting to activity stream: {e}")
+                logger.warning(f"Activity stream disconnected, retrying in 30s")
                 if self._running:
                     # Retry after 5 seconds
                     await asyncio.sleep(5)
