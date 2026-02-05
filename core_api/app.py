@@ -42,44 +42,63 @@ request_duration = Histogram(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup and shutdown events."""
-    # Startup: Initialize clients (socket or HTTP based on config)
-    if settings.USE_UNIX_SOCKETS:
-        app.state.mojo_compute = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)
-        app.state.signal_service = SignalServiceClient(settings.SIGNAL_SERVICE_SOCKET)
-        app.state.news_nlp = NewsNLPClient(settings.NEWS_NLP_SOCKET)
-    else:
-        # Use HTTP clients
-        app.state.mojo_compute = MojoComputeClient(settings.MOJO_COMPUTE_SOCKET)  # Keep socket for now
-        app.state.signal_service = SignalServiceHTTPClient(f"http://{settings.SIGNAL_SERVICE_HOST}:{settings.SIGNAL_SERVICE_PORT}")
-        app.state.news_nlp = NewsNLPClient(settings.NEWS_NLP_SOCKET)  # Keep socket for now
+    print("🚀 Starting core-api initialization...")
 
-    # Test connections
     try:
-        await app.state.mojo_compute.ping()
-        await app.state.signal_service.ping()
-        await app.state.news_nlp.ping()
+        # Startup: Initialize clients with TCP (no more Unix sockets!)
+        app.state.mojo_compute = MojoComputeClient(
+            host=settings.MOJO_COMPUTE_HOST,
+            port=settings.MOJO_COMPUTE_PORT,
+            use_unix=False
+        )
+        app.state.signal_service = SignalServiceHTTPClient(
+            f"http://{settings.SIGNAL_SERVICE_HOST}:{settings.SIGNAL_SERVICE_PORT}"
+        )
+        app.state.news_nlp = NewsNLPClient(
+            host=settings.NEWS_NLP_HOST,
+            port=settings.NEWS_NLP_PORT,
+            use_unix=False
+        )
+
+        print("✅ Clients initialized (mojo-compute:6101, signal-service:6002, news-nlp:6102)")
+
+        # Test connections (with timeout) - Python 3.9 compatible
+        try:
+            import asyncio
+
+            # Use asyncio.wait_for for Python 3.9 compatibility (asyncio.timeout added in 3.11)
+            await asyncio.wait_for(app.state.mojo_compute.ping(), timeout=5.0)
+            print("✅ Mojo compute connected")
+
+            await asyncio.wait_for(app.state.signal_service.ping(), timeout=5.0)
+            print("✅ Signal service connected")
+
+            await asyncio.wait_for(app.state.news_nlp.ping(), timeout=5.0)
+            print("✅ News NLP connected")
+
+        except asyncio.TimeoutError:
+            print("⚠️  Warning: Timeout connecting to services (>5s)")
+            print("   Continuing anyway...")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not connect to all services: {e}")
+            print("   Continuing anyway...")
+
+        print("✅ Core-API ready to accept requests")
     except Exception as e:
-        print(f"Warning: Could not connect to all Mojo services: {e}")
-
-    # Start WebSocket heartbeat
-    from .websocket import manager
-    await manager.start_heartbeat(interval=30)
-    print("WebSocket heartbeat started (30s interval)")
-
-    # Start SSE-to-WebSocket bridge
-    from .bridge import bridge
-    await bridge.start()
-    print("SSE-to-WebSocket bridge started")
+        print(f"❌ Error during startup: {e}")
+        print("   Continuing anyway...")
 
     yield
 
-    # Shutdown: Stop bridge
-    await bridge.stop()
-
     # Shutdown: Close socket connections
-    await app.state.mojo_compute.close()
-    await app.state.signal_service.close()
-    await app.state.news_nlp.close()
+    print("🛑 Shutting down core-api...")
+    try:
+        await app.state.mojo_compute.close()
+        await app.state.signal_service.close()
+        await app.state.news_nlp.close()
+        print("✅ Connections closed")
+    except Exception as e:
+        print(f"⚠️  Error during shutdown: {e}")
 
 
 # Create FastAPI app
@@ -170,11 +189,15 @@ from .routes import (  # noqa: E402
     market,
     config,
     zerodha_auth,
+    indmoney_auth,
     stocks,
+    stock_config,
     portfolio,
     ml,
     watchlist,
     sentiment,
+    predictions,
+    monitoring,
 )
 
 app.include_router(compute.router, prefix="/api/compute", tags=["Compute"])
@@ -186,12 +209,16 @@ app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"]
 app.include_router(market.router, prefix="/api/market", tags=["Market"])
 app.include_router(config.router, prefix="/api/config", tags=["Configuration"])
 app.include_router(stocks.router, prefix="/api/stocks", tags=["Stocks"])
+app.include_router(stock_config.router, prefix="/api/stock-config", tags=["Stock Configuration"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"])
 app.include_router(ml.router, prefix="/api/ml", tags=["ML Analysis"])
 app.include_router(watchlist.router, prefix="/api/watchlist", tags=["Watchlist"])
 app.include_router(sentiment.router, prefix="/api", tags=["Sentiment"])
+app.include_router(predictions.router, prefix="/api/predictions", tags=["Predictions"])
+app.include_router(monitoring.router, prefix="/api", tags=["Monitoring"])
 
 app.include_router(zerodha_auth.router, prefix="/auth/zerodha")
+app.include_router(indmoney_auth.router, prefix="/auth/indmoney")
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):

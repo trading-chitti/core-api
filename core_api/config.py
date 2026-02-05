@@ -12,29 +12,24 @@ class Settings(BaseSettings):
         case_sensitive=True,
     )
 
-    # Socket paths for Mojo services
-    MOJO_COMPUTE_SOCKET: str = "/tmp/mojo-compute.sock"
-    SIGNAL_SERVICE_SOCKET: str = "/tmp/signal-service.sock"
-    NEWS_NLP_SOCKET: str = "/tmp/news-nlp.sock"
-
-    # For TCP sockets (if not using Unix sockets)
+    # TCP ports for services (no more Unix sockets!)
     MOJO_COMPUTE_HOST: str = "localhost"
-    MOJO_COMPUTE_PORT: int = 6004
+    MOJO_COMPUTE_PORT: int = 6101  # Mojo compute service
 
     SIGNAL_SERVICE_HOST: str = "localhost"
     SIGNAL_SERVICE_PORT: int = 6002  # Signal-service HTTP port
 
     NEWS_NLP_HOST: str = "localhost"
-    NEWS_NLP_PORT: int = 6002
+    NEWS_NLP_PORT: int = 6102  # News NLP service
 
-    # Use Unix sockets or TCP
-    USE_UNIX_SOCKETS: bool = False  # Using HTTP for signal-service
+    # All services use TCP now (easier to track and debug)
+    USE_UNIX_SOCKETS: bool = False
 
     # CORS settings
     CORS_ORIGINS: list[str] = [
         "http://localhost:5173",
         "http://localhost:3000",
-        "http://localhost:6004"  # Dashboard
+        "http://localhost:6003",  # Dashboard (via proxy on 6003)
     ]
 
     # API settings
@@ -44,6 +39,11 @@ class Settings(BaseSettings):
     # Zerodha Kite API credentials (must be set via environment variables)
     KITE_API_KEY: str = ""  # Set via KITE_API_KEY env var
     KITE_API_SECRET: str = ""  # Set via KITE_API_SECRET env var
+
+    # Ind Money (IndStocks) API credentials
+    INDMONEY_ENABLED: bool = False  # Set to True to enable Ind Money integration
+    INDMONEY_ACCESS_TOKEN: str = ""  # Set via INDMONEY_ACCESS_TOKEN env var
+    INDMONEY_USER_ID: str = ""  # Optional: Set via INDMONEY_USER_ID env var
 
 
 settings = Settings()

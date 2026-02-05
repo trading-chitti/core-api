@@ -1,11 +1,52 @@
 """Routes for news-nlp service (Mojo)."""
 
-from typing import Optional
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+import json
+import os
 
+import psycopg2
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 router = APIRouter()
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+NEWS_IMPACT_PATH = Path(os.getenv("NEWS_IMPACT_PATH", PROJECT_ROOT / "data" / "news_impact.json"))
+NEWS_IMPACT_CACHE: deque[dict] = deque(maxlen=5000)
+
+
+def _load_impact_cache() -> None:
+    if NEWS_IMPACT_CACHE or not NEWS_IMPACT_PATH.exists():
+        return
+    try:
+        with NEWS_IMPACT_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            NEWS_IMPACT_CACHE.extend(data)
+    except Exception:
+        # best-effort cache load
+        pass
+
+
+def _persist_impact_cache() -> None:
+    try:
+        NEWS_IMPACT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with NEWS_IMPACT_PATH.open("w", encoding="utf-8") as f:
+            json.dump(list(NEWS_IMPACT_CACHE), f, indent=2)
+    except Exception:
+        # best-effort persistence
+        pass
+
+
+def _db_connect():
+    dsn = os.getenv(
+        "TRADING_CHITTI_PG_DSN",
+        "postgresql://hariprasath@localhost:5432/trading_chitti"
+    )
+    return psycopg2.connect(dsn)
 
 
 class AnalyzeTextRequest(BaseModel):
@@ -18,6 +59,69 @@ class IngestRSSRequest(BaseModel):
     """Request model for RSS ingestion."""
 
     url: str = Field(..., min_length=1, max_length=2000)
+
+
+class ImpactBatchRequest(BaseModel):
+    analyses: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ArticleIngestRequest(BaseModel):
+    """Request model for direct article ingestion."""
+
+    title: str = Field(..., min_length=1, max_length=500)
+    url: str = Field(..., min_length=1, max_length=2000)
+    summary: Optional[str] = Field(None, max_length=1000)
+    published_at: str
+    source: str
+    raw: Optional[Dict[str, Any]] = None
+
+
+@router.post("/ingest-article")
+async def ingest_article(article: ArticleIngestRequest):
+    """Ingest a single news article directly into the database.
+
+    This endpoint bypasses news-nlp processing and directly inserts
+    the article into the news.articles table.
+    """
+    try:
+        import hashlib
+        from datetime import datetime
+
+        # Generate article ID
+        article_id = hashlib.sha1(f"{article.url}{article.title}".encode()).hexdigest()
+
+        conn = _db_connect()
+        cur = conn.cursor()
+
+        # Insert article
+        cur.execute("""
+            INSERT INTO news.articles (id, published_at, source, title, url, summary, raw)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+        """, (
+            article_id,
+            article.published_at,
+            article.source,
+            article.title,
+            article.url,
+            article.summary,
+            json.dumps(article.raw) if article.raw else None
+        ))
+
+        inserted = cur.rowcount > 0
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return {
+            "status": "ok" if inserted else "duplicate",
+            "article_id": article_id,
+            "inserted": inserted
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to ingest article: {str(e)}")
 
 
 @router.get("/articles")
@@ -55,6 +159,69 @@ async def get_articles(
         raise HTTPException(status_code=500, detail=f"News NLP error: {str(e)}")
 
 
+@router.get("/stock/{symbol}")
+async def get_stock_news(
+    symbol: str,
+    limit: int = 200,
+    offset: int = 0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """Get news articles linked to a stock symbol."""
+    conn = _db_connect()
+    cur = conn.cursor()
+
+    filters = ["e.exchange = 'NSE'", "e.symbol = %s"]
+    params: List[Any] = [symbol.strip().upper()]
+
+    if start_date:
+        filters.append("a.published_at >= %s")
+        params.append(start_date)
+    if end_date:
+        filters.append("a.published_at <= %s")
+        params.append(end_date)
+
+    where_sql = " AND ".join(filters)
+
+    cur.execute(
+        f"""
+        SELECT
+            a.id,
+            a.published_at::text as published_at,
+            a.source,
+            a.title,
+            a.url,
+            a.summary,
+            a.sentiment_label,
+            a.sentiment_score::float as sentiment_score
+        FROM news.article_entities e
+        JOIN news.articles a ON a.id = e.article_id
+        WHERE {where_sql}
+        ORDER BY a.published_at DESC NULLS LAST
+        LIMIT %s OFFSET %s
+        """,
+        (*params, int(limit), int(offset)),
+    )
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return [
+        {
+            "id": row[0],
+            "published_at": row[1],
+            "source": row[2],
+            "title": row[3],
+            "url": row[4],
+            "summary": row[5],
+            "sentiment_label": row[6],
+            "sentiment_score": row[7],
+        }
+        for row in rows
+    ]
+
+
 @router.get("")
 async def get_news(
     page: int = 1,
@@ -65,15 +232,9 @@ async def get_news(
     Returns paginated news articles with sentiment scores and impact assessment.
     This endpoint matches the dashboard API expectations.
     """
-    import psycopg2
-    import os
     from datetime import datetime
 
-    dsn = os.getenv(
-        "TRADING_CHITTI_PG_DSN",
-        "postgresql://hariprasath@localhost:5432/trading_chitti"
-    )
-    conn = psycopg2.connect(dsn)
+    conn = _db_connect()
     cur = conn.cursor()
 
     offset = (page - 1) * limit
@@ -82,7 +243,7 @@ async def get_news(
     cur.execute("SELECT COUNT(*) FROM news.articles")
     total = cur.fetchone()[0]
 
-    # Get articles with entities
+    # Get articles with entities and analysis
     cur.execute("""
         SELECT
             a.id,
@@ -92,16 +253,18 @@ async def get_news(
             a.sentiment_score,
             a.sentiment_label,
             a.url,
+            a.summary,
             COALESCE(
                 (
-                    SELECT json_agg(ae.symbol)
+                    SELECT json_agg(ae.symbol ORDER BY ae.confidence DESC)
                     FROM news.article_entities ae
                     WHERE ae.article_id = a.id
                     AND ae.confidence > 0.5
-                    LIMIT 5
+                    LIMIT 10
                 ),
                 '[]'::json
-            ) as affected_stocks
+            ) as affected_stocks,
+            a.raw
         FROM news.articles a
         ORDER BY a.published_at DESC
         LIMIT %s OFFSET %s
@@ -113,32 +276,58 @@ async def get_news(
 
     articles = []
     for row in results:
-        # Convert sentiment score to -1 to 1 range
-        sentiment = float(row[4]) if row[4] else 0.0
+        # Extract analysis data from raw JSON if available
+        raw_data = row[9] if row[9] else {}
+        analysis = raw_data.get('analysis', {})
 
-        # Determine impact based on sentiment magnitude
-        sentiment_magnitude = abs(sentiment)
-        if sentiment_magnitude > 0.7:
+        # Use analyzed sentiment if available, otherwise fall back to old data
+        if analysis:
+            sentiment_label = analysis.get('sentiment', 'neutral')
+            sentiment_confidence = float(analysis.get('sentiment_confidence', 0.5))
+            impact_score = float(analysis.get('impact_score', 0.0))
+            affected_sectors = analysis.get('affected_sectors', [])
+            analysis_summary = analysis.get('analysis_summary', '')
+
+            # Convert sentiment label to numeric for compatibility
+            sentiment_map = {'positive': 0.7, 'negative': -0.7, 'neutral': 0.0}
+            sentiment_numeric = sentiment_map.get(sentiment_label, 0.0)
+        else:
+            # Fallback to old sentiment data
+            sentiment_numeric = float(row[4]) if row[4] else 0.0
+            sentiment_label = row[5] or "neutral"
+            sentiment_confidence = abs(sentiment_numeric)
+            impact_score = abs(sentiment_numeric)
+            affected_sectors = []
+            analysis_summary = ""
+
+        # Determine impact category
+        if impact_score > 0.7:
             impact = "high"
-        elif sentiment_magnitude > 0.4:
+        elif impact_score > 0.4:
             impact = "medium"
         else:
             impact = "low"
 
-        # Calculate approximate price movement expectation
-        price_movement = sentiment * 2.0  # Scale sentiment to approximate % movement
+        # Calculate price movement expectation
+        price_movement = sentiment_numeric * 2.5  # Scale sentiment to approximate % movement
 
         articles.append({
             "id": row[0],
             "title": row[1],
             "source": row[2],
             "time": row[3].isoformat() if row[3] else datetime.utcnow().isoformat(),
-            "sentiment": sentiment,
+            "summary": row[7] or "",
+            "sentiment": sentiment_numeric,
+            "sentimentLabel": sentiment_label,
             "impact": impact,
+            "impactScore": round(impact_score, 2),
             "category": row[5] or "general",
-            "affectedStocks": row[7] if row[7] else [],
+            "affectedStocks": row[8] if row[8] else [],
+            "affectedSectors": affected_sectors,
             "priceMovement": round(price_movement, 2),
-            "confidence": min(sentiment_magnitude, 1.0),
+            "confidence": round(sentiment_confidence, 2),
+            "analysisSummary": analysis_summary,
+            "url": row[6],
         })
 
     return {
@@ -194,3 +383,25 @@ async def ingest_rss(request_model: IngestRSSRequest, request: Request):
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"News NLP error: {str(e)}")
+
+
+@router.post("/impact")
+async def store_news_impact(batch: ImpactBatchRequest):
+    """Store news impact analyses from background workers."""
+    _load_impact_cache()
+    now = datetime.utcnow().isoformat() + "Z"
+    for item in batch.analyses:
+        if "ingested_at" not in item:
+            item["ingested_at"] = now
+        NEWS_IMPACT_CACHE.append(item)
+    _persist_impact_cache()
+    return {"status": "ok", "stored": len(batch.analyses)}
+
+
+@router.get("/impact")
+async def list_news_impact(limit: int = 100):
+    """Return recent news impact analyses."""
+    _load_impact_cache()
+    limit = max(1, min(int(limit), 1000))
+    items = list(NEWS_IMPACT_CACHE)[-limit:]
+    return {"items": items, "count": len(items)}

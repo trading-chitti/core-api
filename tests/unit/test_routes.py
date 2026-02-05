@@ -150,6 +150,30 @@ def test_cors_headers(test_client):
     assert response.status_code in [200, 405]
 
 
+@pytest.mark.db
+def test_stock_config_name_filter(test_client):
+    """Test stock config name filter."""
+    try:
+        response = test_client.get("/api/stock-config/stocks?name=Reliance")
+
+        assert response.status_code == 200
+        data = response.json()
+
+        assert "stocks" in data
+        assert "total" in data
+
+        # If any stocks returned, they should match the name filter
+        for stock in data.get("stocks", []):
+            name = (stock.get("name") or "").lower()
+            assert "reliance" in name
+
+    except Exception as e:
+        # Skip if stock_config table doesn't exist yet
+        if "relation" in str(e) and "does not exist" in str(e):
+            pytest.skip(f"Required database table missing: {str(e)}")
+        raise
+
+
 def test_api_documentation(test_client):
     """Test that OpenAPI documentation is available."""
     response = test_client.get("/docs")

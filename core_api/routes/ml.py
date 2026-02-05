@@ -63,29 +63,23 @@ async def store_ml_analysis(analysis: MLAnalysisRequest) -> Dict[str, Any]:
         cur.execute("""
             INSERT INTO trades.analysis (
                 symbol,
-                period_days,
                 trend_direction,
                 trend_slope,
-                trend_r_squared,
                 volatility,
                 atr,
                 rsi,
                 macd,
                 sma_20,
                 sma_50,
-                confidence,
-                signals_count,
-                analysis_json
+                confidence
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
-            RETURNING analysis_id, analysis_date
+            RETURNING id, analysis_date
         """, (
             analysis.symbol,
-            analysis.period_days,
             analysis.trend_direction,
             analysis.trend_slope,
-            analysis.trend_r_squared,
             analysis.volatility,
             analysis.atr,
             analysis.rsi,
@@ -93,8 +87,6 @@ async def store_ml_analysis(analysis: MLAnalysisRequest) -> Dict[str, Any]:
             analysis.sma_20,
             analysis.sma_50,
             analysis.confidence,
-            analysis.signals_count,
-            analysis.analysis_json,
         ))
 
         result = cur.fetchone()

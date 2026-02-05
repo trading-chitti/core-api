@@ -13,73 +13,46 @@ def get_db_connection():
     """Get PostgreSQL connection."""
     dsn = os.getenv(
         "TRADING_CHITTI_PG_DSN",
-        "postgresql://hariprasath@localhost:5432/trading_chitti"
+        "postgresql://hariprasath@localhost:6432/trading_chitti"
     )
     return psycopg2.connect(dsn)
 
 
 @router.get("/top-gainers")
 async def get_top_gainers(limit: int = Query(20, le=100)) -> List[Dict[str, Any]]:
-    """Get top predicted gainers with ML confidence scores.
+    """Get top gainers based on real-time price changes from Zerodha Kite WebSocket.
 
-    Returns stocks with highest predicted gains based on ML analysis.
+    Returns stocks with highest positive price changes today.
     """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Check if trades.analysis table exists
+        # Get real-time gainers from WebSocket data
+        # Calculate change_percent from close vs last_price
         cur.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables
-                WHERE table_schema = 'trades'
-                AND table_name = 'analysis'
-            )
-        """)
-        table_exists = cur.fetchone()[0]
-
-        if not table_exists:
-            # Database schema not initialized - return empty
-            cur.close()
-            conn.close()
-            return []
-
-        # Get latest analysis with positive predictions
-        cur.execute("""
-            WITH latest_analysis AS (
-                SELECT DISTINCT ON (a.symbol)
-                    a.symbol,
-                    s.name,
-                    a.trend_direction,
-                    a.trend_slope,
-                    a.confidence,
-                    e.close as price,
-                    -- Calculate predicted change based on trend slope and confidence
-                    (a.trend_slope * a.confidence * 100) as predicted_change
-                FROM trades.analysis a
-                INNER JOIN md.symbols s ON a.symbol = s.symbol
-                INNER JOIN LATERAL (
-                    SELECT close
-                    FROM md.eod_prices ep
-                    WHERE ep.symbol = a.symbol
-                    AND ep.exchange = 'NSE'
-                    ORDER BY trade_date DESC
-                    LIMIT 1
-                ) e ON true
-                WHERE a.trend_direction IN ('up', 'strong_up')
-                AND a.confidence IS NOT NULL
-                AND s.active = TRUE
-                ORDER BY a.symbol, a.analysis_date DESC
-            )
             SELECT
-                symbol,
-                name,
-                predicted_change,
-                confidence,
-                price
-            FROM latest_analysis
-            WHERE predicted_change > 0
-            ORDER BY predicted_change DESC, confidence DESC
+                i.tradingsymbol as symbol,
+                i.name,
+                r.last_price::float as price,
+                CASE
+                    WHEN r.close > 0 THEN
+                        ((r.last_price - r.close) / r.close * 100)::float
+                    ELSE 0
+                END as change,
+                CASE
+                    WHEN r.close > 0 THEN
+                        LEAST(ABS((r.last_price - r.close) / r.close * 100) / 10.0, 1.0)
+                    ELSE 0.5
+                END as confidence
+            FROM md.realtime_prices r
+            JOIN md.instrument_tokens i ON i.instrument_token = r.instrument_token
+            WHERE i.exchange = 'NSE'
+              AND i.instrument_type = 'EQ'
+              AND r.updated_at > NOW() - INTERVAL '10 minutes'
+              AND r.close > 0
+              AND r.last_price > r.close
+            ORDER BY change DESC
             LIMIT %s
         """, (limit,))
 
@@ -88,86 +61,57 @@ async def get_top_gainers(limit: int = Query(20, le=100)) -> List[Dict[str, Any]
         conn.close()
 
         if not results:
-            # Return empty list if no predictions available
             return []
 
         return [
             {
                 "symbol": row[0],
                 "name": row[1] or row[0],
-                "change": round(float(row[2]) if row[2] else 0.0, 2),
-                "confidence": round(float(row[3]) if row[3] else 0.0, 2),
-                "price": round(float(row[4]) if row[4] else 0.0, 2),
+                "change": round(float(row[3]) if row[3] else 0.0, 2),
+                "confidence": round(float(row[4]) if row[4] else 0.0, 2),
+                "price": round(float(row[2]) if row[2] else 0.0, 2),
             }
             for row in results
         ]
     except Exception as e:
-        # Return empty on error - no mock data
         return []
 
 
 @router.get("/top-losers")
 async def get_top_losers(limit: int = Query(20, le=100)) -> List[Dict[str, Any]]:
-    """Get top predicted losers with ML confidence scores.
+    """Get top losers based on real-time price changes from Zerodha Kite WebSocket.
 
-    Returns stocks with highest predicted losses based on ML analysis.
+    Returns stocks with highest negative price changes today.
     """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Check if trades.analysis table exists
+        # Get real-time losers from WebSocket data
+        # Calculate change_percent from close vs last_price
         cur.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables
-                WHERE table_schema = 'trades'
-                AND table_name = 'analysis'
-            )
-        """)
-        table_exists = cur.fetchone()[0]
-
-        if not table_exists:
-            # Database schema not initialized - return empty
-            cur.close()
-            conn.close()
-            return []
-
-        # Get latest analysis with negative predictions
-        cur.execute("""
-            WITH latest_analysis AS (
-                SELECT DISTINCT ON (a.symbol)
-                    a.symbol,
-                    s.name,
-                    a.trend_direction,
-                    a.trend_slope,
-                    a.confidence,
-                    e.close as price,
-                    -- Calculate predicted change (negative for losers)
-                    (a.trend_slope * a.confidence * 100) as predicted_change
-                FROM trades.analysis a
-                INNER JOIN md.symbols s ON a.symbol = s.symbol
-                INNER JOIN LATERAL (
-                    SELECT close
-                    FROM md.eod_prices ep
-                    WHERE ep.symbol = a.symbol
-                    AND ep.exchange = 'NSE'
-                    ORDER BY trade_date DESC
-                    LIMIT 1
-                ) e ON true
-                WHERE a.trend_direction IN ('down', 'strong_down')
-                AND a.confidence IS NOT NULL
-                AND s.active = TRUE
-                ORDER BY a.symbol, a.analysis_date DESC
-            )
             SELECT
-                symbol,
-                name,
-                predicted_change,
-                confidence,
-                price
-            FROM latest_analysis
-            WHERE predicted_change < 0
-            ORDER BY predicted_change ASC, confidence DESC
+                i.tradingsymbol as symbol,
+                i.name,
+                r.last_price::float as price,
+                CASE
+                    WHEN r.close > 0 THEN
+                        ((r.last_price - r.close) / r.close * 100)::float
+                    ELSE 0
+                END as change,
+                CASE
+                    WHEN r.close > 0 THEN
+                        LEAST(ABS((r.last_price - r.close) / r.close * 100) / 10.0, 1.0)
+                    ELSE 0.5
+                END as confidence
+            FROM md.realtime_prices r
+            JOIN md.instrument_tokens i ON i.instrument_token = r.instrument_token
+            WHERE i.exchange = 'NSE'
+              AND i.instrument_type = 'EQ'
+              AND r.updated_at > NOW() - INTERVAL '10 minutes'
+              AND r.close > 0
+              AND r.last_price < r.close
+            ORDER BY change ASC
             LIMIT %s
         """, (limit,))
 
@@ -182,14 +126,13 @@ async def get_top_losers(limit: int = Query(20, le=100)) -> List[Dict[str, Any]]
             {
                 "symbol": row[0],
                 "name": row[1] or row[0],
-                "change": round(float(row[2]) if row[2] else 0.0, 2),
-                "confidence": round(float(row[3]) if row[3] else 0.0, 2),
-                "price": round(float(row[4]) if row[4] else 0.0, 2),
+                "change": round(float(row[3]) if row[3] else 0.0, 2),
+                "confidence": round(float(row[4]) if row[4] else 0.0, 2),
+                "price": round(float(row[2]) if row[2] else 0.0, 2),
             }
             for row in results
         ]
     except Exception as e:
-        # Return empty on error - no mock data
         return []
 
 
@@ -254,29 +197,60 @@ async def get_stock_data(symbol: str) -> Dict[str, Any]:
 @router.get("/{symbol}/history")
 async def get_stock_history(
     symbol: str,
-    days: int = Query(365, le=730, description="Number of days of history (max 730)")
+    days: int = Query(365, le=730, description="Number of days of history (max 730)"),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Get historical stock data for the specified number of days.
 
     Returns OHLCV data for charting and analysis.
+    If start_date/end_date are provided, they take precedence over days.
     """
     conn = get_db_connection()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT
-            trade_date,
-            open,
-            high,
-            low,
-            close,
-            volume
-        FROM md.eod_prices
-        WHERE symbol = %s
-        AND exchange = 'NSE'
-        AND trade_date >= CURRENT_DATE - INTERVAL '%s days'
-        ORDER BY trade_date ASC
-    """, (symbol, days))
+    if start_date or end_date:
+        filters = ["symbol = %s", "exchange = 'NSE'"]
+        params: List[Any] = [symbol]
+
+        if start_date:
+            filters.append("trade_date >= %s")
+            params.append(start_date)
+        if end_date:
+            filters.append("trade_date <= %s")
+            params.append(end_date)
+
+        where_sql = " AND ".join(filters)
+        cur.execute(
+            f"""
+            SELECT
+                trade_date,
+                open,
+                high,
+                low,
+                close,
+                volume
+            FROM md.eod_prices
+            WHERE {where_sql}
+            ORDER BY trade_date ASC
+            """,
+            tuple(params),
+        )
+    else:
+        cur.execute("""
+            SELECT
+                trade_date,
+                open,
+                high,
+                low,
+                close,
+                volume
+            FROM md.eod_prices
+            WHERE symbol = %s
+            AND exchange = 'NSE'
+            AND trade_date >= CURRENT_DATE - INTERVAL '%s days'
+            ORDER BY trade_date ASC
+        """, (symbol, days))
 
     results = cur.fetchall()
     cur.close()
@@ -299,6 +273,56 @@ async def get_stock_history(
         }
         for row in results
     ]
+
+
+@router.get("/realtime/all")
+async def get_realtime_prices(limit: int = Query(50, le=200)) -> List[Dict[str, Any]]:
+    """Get real-time prices for all tracked symbols from Zerodha Kite WebSocket."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                i.tradingsymbol as symbol,
+                r.last_price::float as last_price,
+                r.volume::bigint as volume,
+                r.open::float as open,
+                r.high::float as high,
+                r.low::float as low,
+                r.close::float as close,
+                r.change_percent::float as change_percent,
+                r.updated_at::text as updated_at
+            FROM md.realtime_prices r
+            JOIN md.instrument_tokens i ON i.instrument_token = r.instrument_token
+            WHERE i.exchange = 'NSE'
+              AND i.instrument_type = 'EQ'
+              AND r.updated_at > NOW() - INTERVAL '5 minutes'
+            ORDER BY r.updated_at DESC
+            LIMIT %s
+        """, (limit,))
+
+        results = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return [
+            {
+                "symbol": row[0],
+                "last_price": float(row[1]) if row[1] else 0.0,
+                "volume": int(row[2]) if row[2] else None,
+                "open": float(row[3]) if row[3] else 0.0,
+                "high": float(row[4]) if row[4] else 0.0,
+                "low": float(row[5]) if row[5] else 0.0,
+                "close": float(row[6]) if row[6] else 0.0,
+                "change_percent": float(row[7]) if row[7] else None,
+                "updated_at": row[8],
+            }
+            for row in results
+        ]
+    except Exception as e:
+        # Return empty list on error
+        return []
 
 
 @router.get("/search")

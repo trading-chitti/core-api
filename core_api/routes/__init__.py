@@ -10,10 +10,12 @@ from . import (
     news,
     portfolio,
     signals,
+    stock_config,
     stocks,
     watchlist,
     ws,
     zerodha_auth,
+    indmoney_auth,
 )
 
 __all__ = [
@@ -26,8 +28,10 @@ __all__ = [
     "news",
     "portfolio",
     "signals",
+    "stock_config",
     "stocks",
     "watchlist",
     "ws",
     "zerodha_auth",
+    "indmoney_auth",
 ]
