@@ -28,46 +28,43 @@ class PredictionResponse(BaseModel):
 
 @router.get("/top-gainers")
 async def get_top_gainers(limit: int = 10) -> List[PredictionResponse]:
-    """Get top predicted gainers for next day."""
+    """Get top predicted gainers for today."""
     conn = psycopg2.connect(PG_DSN)
-    cur = conn.cursor()
-    
-    # Get latest predictions
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    # Get today's top gainers from premarket.predictions
     cur.execute("""
-        SELECT 
-            dp.symbol,
-            dp.current_price,
-            dp.predicted_price,
-            dp.predicted_change_pct,
-            dp.stop_loss,
-            dp.target,
-            dp.confidence,
-            dp.trend,
-            dp.reasoning,
-            dp.technical_summary
-        FROM predictions.daily_predictions dp
-        JOIN predictions.top_movers tm 
-            ON dp.symbol = tm.symbol 
-            AND dp.prediction_date = tm.prediction_date
-        WHERE tm.prediction_date = CURRENT_DATE
-          AND tm.mover_type = 'gainer'
-        ORDER BY tm.rank
+        SELECT
+            symbol,
+            base_price as current_price,
+            target_price as predicted_price,
+            predicted_move_pct as predicted_change_pct,
+            base_price * 0.98 as stop_loss,
+            target_price as target,
+            confidence_score as confidence,
+            signal_type as trend,
+            'ML-predicted based on technical indicators and fundamentals' as reasoning,
+            CONCAT('RSI: ', COALESCE(rsi::text, 'N/A'), ', MACD: ', COALESCE(macd::text, 'N/A')) as technical_summary
+        FROM premarket.predictions
+        WHERE prediction_date = CURRENT_DATE
+          AND category = 'TOP_GAINER'
+        ORDER BY rank_in_category
         LIMIT %s
     """, (limit,))
-    
+
     predictions = []
     for row in cur.fetchall():
         predictions.append(PredictionResponse(
-            symbol=row[0],
-            current_price=float(row[1]),
-            predicted_price=float(row[2]),
-            predicted_change_pct=float(row[3]),
-            stop_loss=float(row[4]),
-            target=float(row[5]),
-            confidence=float(row[6]),
-            trend=row[7],
-            reasoning=row[8] or "",
-            technical_summary=row[9] or ""
+            symbol=row['symbol'],
+            current_price=float(row['current_price']),
+            predicted_price=float(row['predicted_price']),
+            predicted_change_pct=float(row['predicted_change_pct']),
+            stop_loss=float(row['stop_loss']),
+            target=float(row['target']),
+            confidence=float(row['confidence']),
+            trend=row['trend'],
+            reasoning=row['reasoning'],
+            technical_summary=row['technical_summary']
         ))
     
     cur.close()
@@ -78,45 +75,43 @@ async def get_top_gainers(limit: int = 10) -> List[PredictionResponse]:
 
 @router.get("/top-losers")
 async def get_top_losers(limit: int = 10) -> List[PredictionResponse]:
-    """Get top predicted losers for next day."""
+    """Get top predicted losers for today."""
     conn = psycopg2.connect(PG_DSN)
-    cur = conn.cursor()
-    
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    # Get today's top losers from premarket.predictions
     cur.execute("""
-        SELECT 
-            dp.symbol,
-            dp.current_price,
-            dp.predicted_price,
-            dp.predicted_change_pct,
-            dp.stop_loss,
-            dp.target,
-            dp.confidence,
-            dp.trend,
-            dp.reasoning,
-            dp.technical_summary
-        FROM predictions.daily_predictions dp
-        JOIN predictions.top_movers tm 
-            ON dp.symbol = tm.symbol 
-            AND dp.prediction_date = tm.prediction_date
-        WHERE tm.prediction_date = CURRENT_DATE
-          AND tm.mover_type = 'loser'
-        ORDER BY tm.rank
+        SELECT
+            symbol,
+            base_price as current_price,
+            target_price as predicted_price,
+            predicted_move_pct as predicted_change_pct,
+            base_price * 1.02 as stop_loss,
+            target_price as target,
+            confidence_score as confidence,
+            signal_type as trend,
+            'ML-predicted based on technical indicators and fundamentals' as reasoning,
+            CONCAT('RSI: ', COALESCE(rsi::text, 'N/A'), ', MACD: ', COALESCE(macd::text, 'N/A')) as technical_summary
+        FROM premarket.predictions
+        WHERE prediction_date = CURRENT_DATE
+          AND category = 'TOP_LOSER'
+        ORDER BY rank_in_category
         LIMIT %s
     """, (limit,))
-    
+
     predictions = []
     for row in cur.fetchall():
         predictions.append(PredictionResponse(
-            symbol=row[0],
-            current_price=float(row[1]),
-            predicted_price=float(row[2]),
-            predicted_change_pct=float(row[3]),
-            stop_loss=float(row[4]),
-            target=float(row[5]),
-            confidence=float(row[6]),
-            trend=row[7],
-            reasoning=row[8] or "",
-            technical_summary=row[9] or ""
+            symbol=row['symbol'],
+            current_price=float(row['current_price']),
+            predicted_price=float(row['predicted_price']),
+            predicted_change_pct=float(row['predicted_change_pct']),
+            stop_loss=float(row['stop_loss']),
+            target=float(row['target']),
+            confidence=float(row['confidence']),
+            trend=row['trend'],
+            reasoning=row['reasoning'],
+            technical_summary=row['technical_summary']
         ))
     
     cur.close()
