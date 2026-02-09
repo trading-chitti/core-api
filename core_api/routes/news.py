@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional
 import json
 import os
 
-import asyncio
 import logging
+import re
 
 import psycopg2
 import psycopg2.errors
@@ -268,7 +268,6 @@ async def get_news(
     offset: Optional[int] = None,
     sentiment: Optional[str] = None,
     search: Optional[str] = None,
-    category: Optional[str] = None,
     symbol: Optional[str] = None,
 ):
     """Get latest news with sentiment analysis.
@@ -277,73 +276,83 @@ async def get_news(
     This endpoint matches the dashboard API expectations.
     """
 
+    # Clamp inputs
+    limit = max(1, min(limit, 100))
+    page = max(1, page)
+    if offset is not None:
+        offset = max(0, offset)
+
     conn = _db_connect()
     cur = conn.cursor()
 
-    # Use explicit offset if provided, otherwise compute from page
-    effective_offset = offset if offset is not None else (page - 1) * limit
+    try:
+        # Use explicit offset if provided, otherwise compute from page
+        effective_offset = offset if offset is not None else (page - 1) * limit
 
-    # Build dynamic WHERE clause
-    where_clauses: list[str] = []
-    params: list = []
+        # Build dynamic WHERE clause
+        where_clauses: list[str] = []
+        params: list = []
 
-    if sentiment and sentiment in ("positive", "negative", "neutral"):
-        where_clauses.append("a.sentiment_label = %s")
-        params.append(sentiment)
+        if sentiment and sentiment in ("positive", "negative", "neutral"):
+            where_clauses.append("a.sentiment_label = %s")
+            params.append(sentiment)
 
-    if search:
-        where_clauses.append("(a.title ILIKE %s OR a.summary ILIKE %s)")
-        search_pattern = f"%{search}%"
-        params.extend([search_pattern, search_pattern])
+        if search:
+            # Escape LIKE metacharacters
+            escaped = re.sub(r'([%_\\])', r'\\\1', search)
+            where_clauses.append("(a.title ILIKE %s OR a.summary ILIKE %s)")
+            search_pattern = f"%{escaped}%"
+            params.extend([search_pattern, search_pattern])
 
-    if symbol:
-        where_clauses.append("""
-            EXISTS (
-                SELECT 1 FROM news.article_entities ae
-                WHERE ae.article_id = a.id AND ae.symbol = %s
-            )
-        """)
-        params.append(symbol.strip().upper())
+        if symbol:
+            where_clauses.append("""
+                EXISTS (
+                    SELECT 1 FROM news.article_entities ae
+                    WHERE ae.article_id = a.id AND ae.symbol = %s
+                )
+            """)
+            params.append(symbol.strip().upper())
 
-    where_sql = ""
-    if where_clauses:
-        where_sql = "WHERE " + " AND ".join(where_clauses)
+        where_sql = ""
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
 
-    # Get total count with filters
-    cur.execute(f"SELECT COUNT(*) FROM news.articles a {where_sql}", params)
-    total = cur.fetchone()[0]
+        # Get total count with filters
+        cur.execute(f"SELECT COUNT(*) FROM news.articles a {where_sql}", params)
+        total = cur.fetchone()[0]
 
-    # Get articles with entities and analysis
-    cur.execute(f"""
-        SELECT
-            a.id,
-            a.title,
-            a.source,
-            a.published_at,
-            a.sentiment_score,
-            a.sentiment_label,
-            a.url,
-            a.summary,
-            COALESCE(
-                (
-                    SELECT json_agg(ae.symbol ORDER BY ae.confidence DESC)
-                    FROM news.article_entities ae
-                    WHERE ae.article_id = a.id
-                    AND ae.confidence > 0.5
-                    LIMIT 10
-                ),
-                '[]'::json
-            ) as affected_stocks,
-            a.raw
-        FROM news.articles a
-        {where_sql}
-        ORDER BY a.published_at DESC
-        LIMIT %s OFFSET %s
-    """, (*params, limit, effective_offset))
+        # Get articles with entities and analysis
+        cur.execute(f"""
+            SELECT
+                a.id,
+                a.title,
+                a.source,
+                a.published_at,
+                a.sentiment_score,
+                a.sentiment_label,
+                a.url,
+                a.summary,
+                COALESCE(
+                    (
+                        SELECT json_agg(ae.symbol ORDER BY ae.confidence DESC)
+                        FROM news.article_entities ae
+                        WHERE ae.article_id = a.id
+                        AND ae.confidence > 0.5
+                        LIMIT 10
+                    ),
+                    '[]'::json
+                ) as affected_stocks,
+                a.raw
+            FROM news.articles a
+            {where_sql}
+            ORDER BY a.published_at DESC
+            LIMIT %s OFFSET %s
+        """, (*params, limit, effective_offset))
 
-    results = cur.fetchall()
-    cur.close()
-    conn.close()
+        results = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
 
     articles = []
     for row in results:
