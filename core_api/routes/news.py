@@ -7,9 +7,15 @@ from typing import Any, Dict, List, Optional
 import json
 import os
 
+import logging
+import re
+
 import psycopg2
+import psycopg2.errors
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -85,7 +91,6 @@ async def ingest_article(article: ArticleIngestRequest):
     """
     try:
         import hashlib
-        from datetime import datetime
 
         # Generate article ID
         article_id = hashlib.sha1(f"{article.url}{article.title}".encode()).hexdigest()
@@ -93,26 +98,60 @@ async def ingest_article(article: ArticleIngestRequest):
         conn = _db_connect()
         cur = conn.cursor()
 
-        # Insert article
-        cur.execute("""
-            INSERT INTO news.articles (id, published_at, source, title, url, summary, raw)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO NOTHING
-        """, (
-            article_id,
-            article.published_at,
-            article.source,
-            article.title,
-            article.url,
-            article.summary,
-            json.dumps(article.raw) if article.raw else None
-        ))
+        # Insert article (handle both id and url unique constraints)
+        try:
+            cur.execute("""
+                INSERT INTO news.articles (id, published_at, source, title, url, summary, raw)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+            """, (
+                article_id,
+                article.published_at,
+                article.source,
+                article.title,
+                article.url,
+                article.summary,
+                json.dumps(article.raw) if article.raw else None
+            ))
+            inserted = cur.rowcount > 0
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
+            cur.close()
+            conn.close()
+            return {
+                "status": "duplicate",
+                "article_id": article_id,
+                "inserted": False
+            }
 
-        inserted = cur.rowcount > 0
         conn.commit()
-
         cur.close()
         conn.close()
+
+        # Broadcast new article via WebSocket
+        if inserted:
+            try:
+                from core_api.websocket import manager
+                await manager.broadcast_to_channel("news", {
+                    "type": "new_article",
+                    "article": {
+                        "id": article_id,
+                        "title": article.title,
+                        "source": article.source,
+                        "time": article.published_at,
+                        "url": article.url,
+                        "summary": article.summary or "",
+                        "sentiment": 0.0,
+                        "sentimentLabel": "neutral",
+                        "impact": "low",
+                        "category": "general",
+                        "affectedStocks": [],
+                        "priceMovement": 0.0,
+                        "confidence": 0.5,
+                    }
+                })
+            except Exception as ws_err:
+                logger.warning(f"WebSocket broadcast failed: {ws_err}")
 
         return {
             "status": "ok" if inserted else "duplicate",
@@ -225,54 +264,95 @@ async def get_stock_news(
 @router.get("")
 async def get_news(
     page: int = 1,
-    limit: int = 20
+    limit: int = 20,
+    offset: Optional[int] = None,
+    sentiment: Optional[str] = None,
+    search: Optional[str] = None,
+    symbol: Optional[str] = None,
 ):
     """Get latest news with sentiment analysis.
 
     Returns paginated news articles with sentiment scores and impact assessment.
     This endpoint matches the dashboard API expectations.
     """
-    from datetime import datetime
+
+    # Clamp inputs
+    limit = max(1, min(limit, 100))
+    page = max(1, page)
+    if offset is not None:
+        offset = max(0, offset)
 
     conn = _db_connect()
     cur = conn.cursor()
 
-    offset = (page - 1) * limit
+    try:
+        # Use explicit offset if provided, otherwise compute from page
+        effective_offset = offset if offset is not None else (page - 1) * limit
 
-    # Get total count
-    cur.execute("SELECT COUNT(*) FROM news.articles")
-    total = cur.fetchone()[0]
+        # Build dynamic WHERE clause
+        where_clauses: list[str] = []
+        params: list = []
 
-    # Get articles with entities and analysis
-    cur.execute("""
-        SELECT
-            a.id,
-            a.title,
-            a.source,
-            a.published_at,
-            a.sentiment_score,
-            a.sentiment_label,
-            a.url,
-            a.summary,
-            COALESCE(
-                (
-                    SELECT json_agg(ae.symbol ORDER BY ae.confidence DESC)
-                    FROM news.article_entities ae
-                    WHERE ae.article_id = a.id
-                    AND ae.confidence > 0.5
-                    LIMIT 10
-                ),
-                '[]'::json
-            ) as affected_stocks,
-            a.raw
-        FROM news.articles a
-        ORDER BY a.published_at DESC
-        LIMIT %s OFFSET %s
-    """, (limit, offset))
+        if sentiment and sentiment in ("positive", "negative", "neutral"):
+            where_clauses.append("a.sentiment_label = %s")
+            params.append(sentiment)
 
-    results = cur.fetchall()
-    cur.close()
-    conn.close()
+        if search:
+            # Escape LIKE metacharacters
+            escaped = re.sub(r'([%_\\])', r'\\\1', search)
+            where_clauses.append("(a.title ILIKE %s OR a.summary ILIKE %s)")
+            search_pattern = f"%{escaped}%"
+            params.extend([search_pattern, search_pattern])
+
+        if symbol:
+            where_clauses.append("""
+                EXISTS (
+                    SELECT 1 FROM news.article_entities ae
+                    WHERE ae.article_id = a.id AND ae.symbol = %s
+                )
+            """)
+            params.append(symbol.strip().upper())
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+
+        # Get total count with filters
+        cur.execute(f"SELECT COUNT(*) FROM news.articles a {where_sql}", params)
+        total = cur.fetchone()[0]
+
+        # Get articles with entities and analysis
+        cur.execute(f"""
+            SELECT
+                a.id,
+                a.title,
+                a.source,
+                a.published_at,
+                a.sentiment_score,
+                a.sentiment_label,
+                a.url,
+                a.summary,
+                COALESCE(
+                    (
+                        SELECT json_agg(ae.symbol ORDER BY ae.confidence DESC)
+                        FROM news.article_entities ae
+                        WHERE ae.article_id = a.id
+                        AND ae.confidence > 0.5
+                        LIMIT 10
+                    ),
+                    '[]'::json
+                ) as affected_stocks,
+                a.raw
+            FROM news.articles a
+            {where_sql}
+            ORDER BY a.published_at DESC
+            LIMIT %s OFFSET %s
+        """, (*params, limit, effective_offset))
+
+        results = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
 
     articles = []
     for row in results:
@@ -334,7 +414,7 @@ async def get_news(
         "articles": articles,
         "total": total,
         "page": page,
-        "hasMore": (offset + limit) < total
+        "hasMore": (effective_offset + limit) < total
     }
 
 
