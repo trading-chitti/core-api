@@ -27,3 +27,14 @@ htmlcov/
 
 # Logs
 *.log
+
+# Go
+core-api
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
