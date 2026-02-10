@@ -20,10 +20,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Histogram, make_asgi_app
 
-from .clients.mojo_compute_client import MojoComputeClient
-from .clients.signal_service_client import SignalServiceClient
-from .clients.signal_service_http_client import SignalServiceHTTPClient
-from .clients.news_nlp_client import NewsNLPClient
 from .config import settings
 
 # Prometheus metrics
@@ -44,61 +40,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup and shutdown events."""
     print("🚀 Starting core-api initialization...")
 
-    try:
-        # Startup: Initialize clients with TCP (no more Unix sockets!)
-        app.state.mojo_compute = MojoComputeClient(
-            host=settings.MOJO_COMPUTE_HOST,
-            port=settings.MOJO_COMPUTE_PORT,
-            use_unix=False
-        )
-        app.state.signal_service = SignalServiceHTTPClient(
-            f"http://{settings.SIGNAL_SERVICE_HOST}:{settings.SIGNAL_SERVICE_PORT}"
-        )
-        app.state.news_nlp = NewsNLPClient(
-            host=settings.NEWS_NLP_HOST,
-            port=settings.NEWS_NLP_PORT,
-            use_unix=False
-        )
-
-        print("✅ Clients initialized (mojo-compute:6101, signal-service:6002, news-nlp:6102)")
-
-        # Test connections (with timeout) - Python 3.9 compatible
-        try:
-            import asyncio
-
-            # Use asyncio.wait_for for Python 3.9 compatibility (asyncio.timeout added in 3.11)
-            await asyncio.wait_for(app.state.mojo_compute.ping(), timeout=5.0)
-            print("✅ Mojo compute connected")
-
-            await asyncio.wait_for(app.state.signal_service.ping(), timeout=5.0)
-            print("✅ Signal service connected")
-
-            await asyncio.wait_for(app.state.news_nlp.ping(), timeout=5.0)
-            print("✅ News NLP connected")
-
-        except asyncio.TimeoutError:
-            print("⚠️  Warning: Timeout connecting to services (>5s)")
-            print("   Continuing anyway...")
-        except Exception as e:
-            print(f"⚠️  Warning: Could not connect to all services: {e}")
-            print("   Continuing anyway...")
-
-        print("✅ Core-API ready to accept requests")
-    except Exception as e:
-        print(f"❌ Error during startup: {e}")
-        print("   Continuing anyway...")
+    # Core-API now operates as a standalone REST API with direct database access
+    # No need for service clients - monitoring endpoint handles service health checks
+    print("✅ Core-API ready to accept requests")
 
     yield
 
-    # Shutdown: Close socket connections
+    # Shutdown
     print("🛑 Shutting down core-api...")
-    try:
-        await app.state.mojo_compute.close()
-        await app.state.signal_service.close()
-        await app.state.news_nlp.close()
-        print("✅ Connections closed")
-    except Exception as e:
-        print(f"⚠️  Error during shutdown: {e}")
+    print("✅ Shutdown complete")
 
 
 # Create FastAPI app
@@ -130,37 +80,15 @@ def now_iso() -> str:
 
 @app.get("/health")
 async def health_check():
-    """Check health of API gateway and all Mojo services."""
-    services_status = {}
-
-    # Check mojo-compute
-    try:
-        await app.state.mojo_compute.ping()
-        services_status["mojo-compute"] = "healthy"
-    except Exception as e:
-        services_status["mojo-compute"] = f"unhealthy: {str(e)}"
-
-    # Check signal-service
-    try:
-        await app.state.signal_service.ping()
-        services_status["signal-service"] = "healthy"
-    except Exception as e:
-        services_status["signal-service"] = f"unhealthy: {str(e)}"
-
-    # Check news-nlp
-    try:
-        await app.state.news_nlp.ping()
-        services_status["news-nlp"] = "healthy"
-    except Exception as e:
-        services_status["news-nlp"] = f"unhealthy: {str(e)}"
-
-    all_healthy = all(status == "healthy" for status in services_status.values())
-
+    """Check health of core-api service."""
+    # Core-API is standalone - just check if we're running
+    # For detailed service health, use /api/monitoring/services/health
     return JSONResponse(
-        status_code=200 if all_healthy else 503,
+        status_code=200,
         content={
-            "status": "healthy" if all_healthy else "degraded",
-            "services": services_status,
+            "status": "healthy",
+            "service": "core-api",
+            "version": "0.1.0",
             "timestamp": now_iso(),
         },
     )

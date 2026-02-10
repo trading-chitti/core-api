@@ -211,9 +211,9 @@ class InvestmentSignalsResponse(BaseModel):
 
 @router.get("/investment-signals", response_model=InvestmentSignalsResponse)
 async def get_investment_signals(
-    min_confidence: float = Query(70.0, ge=0, le=100, description="Minimum confidence percentage"),
-    min_success_rate: float = Query(60.0, ge=0, le=100, description="Minimum historical success rate"),
-    require_news_sentiment: bool = Query(True, description="Require positive news sentiment"),
+    min_confidence: float = Query(60.0, ge=0, le=100, description="Minimum confidence percentage"),
+    min_success_rate: float = Query(40.0, ge=0, le=100, description="Minimum historical success rate"),
+    require_news_sentiment: bool = Query(False, description="Require positive news sentiment"),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of stock signals")
 ):
     """
@@ -294,12 +294,15 @@ async def get_investment_signals(
             p.predicted_at as timestamp
 
         FROM premarket.predictions p
+        INNER JOIN md.stock_config sc ON p.symbol = sc.symbol
         LEFT JOIN stock_success_rates sr ON p.symbol = sr.symbol
         LEFT JOIN premarket.daily_stats ds ON p.prediction_date = ds.prediction_date
         LEFT JOIN stock_sentiment ss ON p.symbol = ss.symbol
         WHERE p.prediction_date = CURRENT_DATE
+            AND sc.active = TRUE
+            AND sc.investment_enabled = TRUE
             AND p.confidence_score * 100 >= %s
-            AND COALESCE(sr.success_rate, ds.top_gainers_success_rate, 0) >= %s
+            AND COALESCE(sr.success_rate, ds.top_gainers_success_rate, 50.0) >= %s
             AND (NOT %s OR COALESCE(ss.sentiment_7d, 0) > 0)
         ORDER BY p.confidence_score DESC, ABS(p.predicted_move_pct) DESC
         LIMIT %s
@@ -376,7 +379,10 @@ async def get_investment_signals(
 
         FROM sector_trends st
         JOIN premarket.predictions p ON p.sector = st.sector AND p.prediction_date = CURRENT_DATE
+        INNER JOIN md.stock_config sc ON p.symbol = sc.symbol
         WHERE p.confidence_score * 100 >= %s
+            AND sc.active = TRUE
+            AND sc.investment_enabled = TRUE
         GROUP BY st.sector, st.avg_sentiment, st.article_count, st.stocks_count
         HAVING COUNT(p.symbol) > 0
         ORDER BY st.avg_sentiment DESC

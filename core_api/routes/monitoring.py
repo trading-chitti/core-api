@@ -25,12 +25,10 @@ async def get_services_health():
     """
     services = {
         "core-api": {"url": "http://localhost:6001/health", "port": 6001},
-        "signal-service": {"url": "http://localhost:6002/health", "port": 6002},
-        "intraday-engine": {"url": "http://localhost:6008/health", "port": 6008},
-        "dashboard": {"url": "http://localhost:3000", "port": 3000},  # Next.js server
-        "dashboard-proxy": {"url": "http://localhost:6003", "port": 6003},  # Reverse proxy
-        "mojo-compute": {"tcp_port": 6101},  # TCP socket server
-        "news-nlp": {"tcp_port": 6102},  # TCP socket server
+        "dashboard": {"url": "http://localhost:6003", "port": 6003},  # Next.js with Bun
+        "intraday-engine": {"url": "http://localhost:6007/health", "port": 6007},
+        "news-nlp": {"url": "http://localhost:6008/health", "port": 6008},
+        "market-bridge": {"url": "http://localhost:6005/health", "port": 6005},
         "postgres": {"url": "postgresql://hariprasath@localhost:6432/trading_chitti", "port": 6432},
     }
 

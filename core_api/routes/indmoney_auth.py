@@ -7,8 +7,11 @@ from fastapi import APIRouter, HTTPException, Request, Body
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import httpx
+
+# IST timezone offset
+IST = timezone(timedelta(hours=5, minutes=30))
 from typing import Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -53,7 +56,8 @@ def update_broker_config(
     user_id: Optional[str] = None,
     user_name: Optional[str] = None,
     enabled: Optional[bool] = None,
-    additional_config: Optional[dict] = None
+    additional_config: Optional[dict] = None,
+    token_expires_at: Optional[datetime] = None,
 ):
     """Update broker configuration in database."""
     try:
@@ -81,6 +85,10 @@ def update_broker_config(
                 if additional_config is not None:
                     update_fields.append("additional_config = %s")
                     params.append(json.dumps(additional_config))
+
+                if token_expires_at is not None:
+                    update_fields.append("token_expires_at = %s")
+                    params.append(token_expires_at)
 
                 update_fields.append("last_authenticated_at = %s")
                 params.append(datetime.now())
@@ -175,6 +183,11 @@ async def store_token(token_data: TokenRequest):
                     user_id = token_data.user_id or profile_data.get("user_id", "default")
                     user_name = token_data.user_name or profile_data.get("name", user_id)
 
+                    # Calculate token expiry (tomorrow 7:00 AM IST)
+                    now_ist = datetime.now(IST)
+                    tomorrow = now_ist + timedelta(days=1)
+                    indmoney_expiry = tomorrow.replace(hour=7, minute=0, second=0, microsecond=0)
+
                     # Store token in database
                     success = update_broker_config(
                         broker_name="indmoney",
@@ -182,7 +195,8 @@ async def store_token(token_data: TokenRequest):
                         user_id=user_id,
                         user_name=user_name,
                         enabled=True,
-                        additional_config={"profile": profile_data}
+                        additional_config={"profile": profile_data},
+                        token_expires_at=indmoney_expiry,
                     )
 
                     if not success:
@@ -253,6 +267,15 @@ async def check_auth_status():
             ]
         }
 
+    # Check if token is expired
+    token_expires_at = config.get("token_expires_at")
+    is_expired = False
+    if token_expires_at:
+        now_ist = datetime.now(IST)
+        if token_expires_at.tzinfo is None:
+            token_expires_at = token_expires_at.replace(tzinfo=IST)
+        is_expired = now_ist > token_expires_at
+
     return {
         "status": "authenticated",
         "enabled": config["enabled"],
@@ -261,6 +284,8 @@ async def check_auth_status():
         "authenticated_at": config.get("last_authenticated_at").isoformat() if config.get("last_authenticated_at") else None,
         "token_configured": bool(config.get("access_token")),
         "token_length": len(config.get("access_token", "")),
+        "token_expires_at": token_expires_at.isoformat() if token_expires_at else None,
+        "is_expired": is_expired,
         "broker": "Ind Money (IndStocks)"
     }
 

@@ -83,6 +83,7 @@ async def list_stock_configs(
     investment_enabled: Optional[bool] = Query(None),
     fetcher: Optional[str] = Query(None),
     active: Optional[bool] = Query(True),
+    selection_type: Optional[str] = Query(None),
 ):
     """
     Get list of stock configurations with filtering and pagination.
@@ -99,6 +100,7 @@ async def list_stock_configs(
     - investment_enabled: Filter by investment feature status
     - fetcher: Filter by assigned broker (ZERODHA, INDMONEY, PAYTM)
     - active: Filter by active status (default: true)
+    - selection_type: Filter by AI selection type (MORNING_ML, WILDCARD_NEWS, NOT_SELECTED)
     """
     try:
         conn = psycopg2.connect(PG_DSN)
@@ -147,6 +149,13 @@ async def list_stock_configs(
             where_clauses.append("sc.fetcher = %s")
             params.append(fetcher)
 
+        if selection_type:
+            if selection_type == 'NOT_SELECTED':
+                where_clauses.append("(sc.intraday_ai_picked = FALSE OR sc.intraday_ai_picked IS NULL)")
+            elif selection_type in ('MORNING_ML', 'WILDCARD_NEWS'):
+                where_clauses.append("sc.selection_type = %s")
+                params.append(selection_type)
+
         where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
 
         # Get total count
@@ -159,7 +168,8 @@ async def list_stock_configs(
             SELECT
                 sc.id, sc.symbol, sc.exchange, sc.name, sc.sector,
                 sc.intraday_enabled, sc.investment_enabled, sc.fetcher,
-                sc.active, sc.created_at, sc.updated_at, sc.market_cap_category
+                sc.active, sc.created_at, sc.updated_at, sc.market_cap_category,
+                sc.intraday_ai_picked, sc.selection_type
             FROM md.stock_config sc
             WHERE {where_clause}
             ORDER BY sc.symbol ASC
