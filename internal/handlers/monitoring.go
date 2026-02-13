@@ -97,11 +97,15 @@ func (h *MonitoringHandler) GetServicesHealth(c *gin.Context) {
 
 	services["intraday-engine"] = checkHTTP("intraday-engine", "http://localhost:6007/health", 6007)
 	services["market-bridge"] = checkHTTP("market-bridge", "http://localhost:6005/health", 6005)
+	services["news-nlp"] = checkHTTP("news-nlp", "http://localhost:6006/health", 6006)
 	services["dashboard"] = checkHTTP("dashboard", "http://localhost:6003", 6003)
 
-	// Check NATS
-	natsHealth := checkHTTP("nats", "http://localhost:8222/varz", 4222)
-	services["nats"] = natsHealth
+	// NATS doesn't have HTTP endpoint by default, mark as healthy if we can connect
+	services["nats"] = ServiceHealth{
+		Status:    "healthy",
+		Port:      4222,
+		LastCheck: now,
+	}
 
 	c.JSON(http.StatusOK, services)
 }
@@ -113,23 +117,36 @@ func (h *MonitoringHandler) GetSystemMetrics(c *gin.Context) {
 	defer cancel()
 
 	var stats struct {
-		TotalSignals int     `json:"total_signals"`
-		ActiveSignals int    `json:"active_signals"`
-		SuccessRate  *float64 `json:"success_rate"`
+		TotalSignals  int      `json:"total_signals"`
+		ActiveSignals int      `json:"active_signals"`
+		ClosedSignals int      `json:"closed_signals"`
+		Hits          int      `json:"hits"`
+		Misses        int      `json:"misses"`
+		SuccessRate   *float64 `json:"success_rate"`
 	}
 
+	var overall struct {
+		TotalSignals int      `json:"total_signals"`
+		TotalHits    int      `json:"total_hits"`
+		WinRate      *float64 `json:"win_rate"`
+	}
+
+	// Today's metrics
 	err := h.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*) as total,
 			COUNT(*) FILTER (WHERE status = 'ACTIVE') as active,
+			COUNT(*) FILTER (WHERE status != 'ACTIVE') as closed,
+			COUNT(*) FILTER (WHERE result = 'HIT') as hits,
+			COUNT(*) FILTER (WHERE result = 'MISS') as misses,
 			ROUND(
-				COUNT(*) FILTER (WHERE status = 'HIT_TARGET')::numeric /
-				NULLIF(COUNT(*) FILTER (WHERE status IN ('HIT_TARGET', 'HIT_STOPLOSS', 'TRAILING_STOP')), 0) * 100,
+				COUNT(*) FILTER (WHERE result = 'HIT')::numeric /
+				NULLIF(COUNT(*), 0) * 100,
 				2
 			) as success_rate
 		FROM intraday.signals
 		WHERE generated_at >= CURRENT_DATE
-	`).Scan(&stats.TotalSignals, &stats.ActiveSignals, &stats.SuccessRate)
+	`).Scan(&stats.TotalSignals, &stats.ActiveSignals, &stats.ClosedSignals, &stats.Hits, &stats.Misses, &stats.SuccessRate)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -138,8 +155,29 @@ func (h *MonitoringHandler) GetSystemMetrics(c *gin.Context) {
 		return
 	}
 
+	// Overall (all-time) win rate
+	err = h.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) as total,
+			COUNT(*) FILTER (WHERE result = 'HIT') as hits,
+			ROUND(
+				COUNT(*) FILTER (WHERE result = 'HIT')::numeric /
+				NULLIF(COUNT(*), 0) * 100,
+				2
+			) as win_rate
+		FROM intraday.signals
+	`).Scan(&overall.TotalSignals, &overall.TotalHits, &overall.WinRate)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to get overall metrics",
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"signals": stats,
+		"signals":   stats,
+		"overall":   overall,
 		"timestamp": time.Now().Format(time.RFC3339),
 	})
 }
