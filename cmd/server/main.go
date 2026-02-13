@@ -46,13 +46,15 @@ func main() {
 	} else {
 		defer subscriber.Close()
 		if err := subscriber.Subscribe(); err != nil {
-			log.Fatalf("❌ Failed to subscribe to NATS: %v", err)
+			log.Printf("⚠️  NATS subscription failed, continuing without events: %v", err)
 		}
 	}
 
 	// Create HTTP handlers
 	handler := handlers.NewHandler(db, hub)
 	monitoringHandler := handlers.NewMonitoringHandler(db.GetConn())
+	quantHandler := handlers.NewQuantAnalyticsHandler(db.GetConn())
+	systemHandler := handlers.NewSystemHandler(db.GetConn())
 
 	// Setup Gin router
 	gin.SetMode(gin.ReleaseMode)
@@ -64,16 +66,131 @@ func main() {
 	// API routes
 	api := router.Group("/api")
 	{
-		// Signals endpoints
-		api.GET("/signals", handler.GetSignals)
-		api.GET("/signals/active", handler.GetActiveSignals)
-		api.GET("/signals/:id", handler.GetSignalByID)
+		// Portfolio endpoints
+		api.GET("/portfolio/stats", handler.GetPortfolioStats)
 
-		// Monitoring endpoints
-		monitoring := api.Group("/monitoring")
+		// Stock endpoints
+		stocksGroup := api.Group("/stocks")
 		{
-			monitoring.GET("/services/health", monitoringHandler.GetServicesHealth)
-			monitoring.GET("/metrics", monitoringHandler.GetSystemMetrics)
+			stocksGroup.GET("/top-gainers", handler.GetTopGainers)
+			stocksGroup.GET("/top-losers", handler.GetTopLosers)
+			stocksGroup.GET("/realtime/all", handler.GetRealtimePrices)
+			stocksGroup.GET("/search", handler.SearchStocks)
+			stocksGroup.GET("/:symbol/realtime", handler.GetRealtimePrice)
+			stocksGroup.GET("/:symbol", handler.GetStockData)
+		}
+
+		// News endpoints
+		api.GET("/news", handler.GetNews)
+
+		// Signals endpoints
+		signalsGroup := api.Group("/signals")
+		{
+			signalsGroup.GET("", handler.GetSignals)
+			signalsGroup.GET("/active", handler.GetActiveSignals)
+			signalsGroup.GET("/alerts", handler.GetSignalAlerts)
+			signalsGroup.GET("/investment-signals", handler.GetInvestmentSignals)
+			signalsGroup.GET("/dashboard", handler.GetDashboardData)
+			signalsGroup.GET("/:id", handler.GetSignalByID)
+		}
+
+		// Predictions endpoints
+		predictionsGroup := api.Group("/predictions")
+		{
+			predictionsGroup.GET("/top-gainers", handler.GetPredictedGainers)
+			predictionsGroup.GET("/top-losers", handler.GetPredictedLosers)
+		}
+
+		// Market data endpoints
+		marketGroup := api.Group("/market")
+		{
+			marketGroup.GET("/indices", handler.GetMarketIndices)
+		}
+
+		// Watchlist endpoints
+		watchlistGroup := api.Group("/watchlist")
+		{
+			watchlistGroup.GET("", handler.GetWatchlist)
+			watchlistGroup.POST("", handler.AddToWatchlist)
+			watchlistGroup.DELETE("/:symbol", handler.RemoveFromWatchlist)
+		}
+
+		// Stock configuration endpoints
+		stockConfigGroup := api.Group("/stock-config")
+		{
+			stockConfigGroup.GET("/stocks", handler.GetStockConfigs)
+			stockConfigGroup.PUT("/stocks/:symbol/:exchange", handler.UpdateStockConfig)
+			stockConfigGroup.GET("/stats", handler.GetStockConfigStats)
+			stockConfigGroup.GET("/export-csv", handler.ExportStockConfigsCSV)
+			stockConfigGroup.POST("/import-csv", handler.ImportStockConfigsCSV)
+			stockConfigGroup.GET("/import-jobs/:jobId", handler.GetImportJobStatus)
+		}
+
+		// System configuration endpoints
+		configGroup := api.Group("/config")
+		{
+			configGroup.GET("/smart-selection", handler.GetSmartSelection)
+			configGroup.PUT("/smart-selection", handler.UpdateSmartSelection)
+			configGroup.GET("/stock-counts", handler.GetStockCounts)
+			configGroup.PUT("/smart-selection/stock-count", handler.UpdateSmartSelectionStockCount)
+		}
+
+		// Monitor endpoints (dashboard compatibility)
+		monitorGroup := api.Group("/monitor")
+		{
+			monitorGroup.GET("/services", handler.GetMonitorServices)
+			monitorGroup.GET("/services/:service", handler.GetMonitorService)
+		}
+
+		// Monitoring endpoints (detailed)
+		monitoringGroup := api.Group("/monitoring")
+		{
+			monitoringGroup.GET("/services/health", monitoringHandler.GetServicesHealth)
+			monitoringGroup.GET("/metrics", monitoringHandler.GetSystemMetrics)
+			monitoringGroup.GET("/metrics/request-rate", monitoringHandler.GetRequestRate)
+			monitoringGroup.GET("/metrics/response-time", monitoringHandler.GetResponseTime)
+			monitoringGroup.GET("/metrics/error-rate", monitoringHandler.GetErrorRate)
+			monitoringGroup.GET("/system/resources", monitoringHandler.GetSystemResources)
+			monitoringGroup.GET("/logs/recent", monitoringHandler.GetRecentLogs)
+			monitoringGroup.GET("/logs/errors", monitoringHandler.GetErrorLogs)
+			monitoringGroup.GET("/broker-status", monitoringHandler.GetBrokerStatus)
+		}
+
+		// Quantitative Analytics endpoints
+		quantGroup := api.Group("/quant")
+		{
+			quantGroup.GET("/analytics", quantHandler.GetQuantAnalytics)
+		}
+
+		// System monitoring endpoints
+		systemGroup := api.Group("/system")
+		{
+			systemGroup.GET("/services", systemHandler.GetServices)
+			systemGroup.GET("/jobs", systemHandler.GetJobs)
+			systemGroup.POST("/jobs/:jobName/run", systemHandler.RunJobManually)
+			systemGroup.GET("/ml-models", systemHandler.GetMLModels)
+		}
+
+		// Authentication endpoints
+		authGroup := api.Group("/auth")
+		{
+			zerodhaGroup := authGroup.Group("/zerodha")
+			{
+				zerodhaGroup.GET("/login-url", handler.GetZerodhaLoginUrl)
+				zerodhaGroup.POST("/request-token", handler.ExchangeRequestToken)
+				zerodhaGroup.POST("/token", handler.SaveAccessToken)
+				zerodhaGroup.GET("/status", handler.GetZerodhaAuthStatus)
+				zerodhaGroup.DELETE("/logout/:user_id", handler.LogoutZerodha)
+				zerodhaGroup.POST("/logout/:user_id", handler.LogoutZerodha)
+			}
+
+			indmoneyGroup := authGroup.Group("/indmoney")
+			{
+				indmoneyGroup.POST("/token", handler.SaveIndMoneyToken)
+				indmoneyGroup.GET("/status", handler.GetIndMoneyAuthStatus)
+				indmoneyGroup.DELETE("/logout", handler.LogoutIndMoney)
+				indmoneyGroup.POST("/logout", handler.LogoutIndMoney)
+			}
 		}
 	}
 
@@ -87,28 +204,26 @@ func main() {
 	router.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"name":        "Trading-Chitti Core API (Go)",
-			"version":     "1.0.0",
-			"description": "High-performance API with real-time WebSocket streaming",
-			"docs":        "/docs",
+			"version":     "2.0.0",
+			"description": "Full-featured API with real-time WebSocket streaming",
+			"endpoints":   59,
 			"health":      "/health",
 			"websocket":   "/ws",
 		})
 	})
 
-	// Get port from environment (default to 6001 - same as Python core-api)
+	// Get port from environment
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "6001"
 	}
 
-	log.Printf("✅ Core API Go listening on port %s", port)
-	log.Println("📡 WebSocket endpoint: ws://localhost:" + port + "/ws")
-	log.Println("🔌 REST API: http://localhost:" + port + "/api/signals")
+	log.Printf("✅ Core API Go listening on port %s (59 endpoints)", port)
 
 	// Start server in goroutine
 	go func() {
 		if err := router.Run(":" + port); err != nil {
-			log.Fatalf("❌ Server failed: %v", err)
+			log.Fatalf("Server failed: %v", err)
 		}
 	}()
 
@@ -117,5 +232,5 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("👋 Shutting down Core API Go...")
+	log.Println("Shutting down Core API Go...")
 }

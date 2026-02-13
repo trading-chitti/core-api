@@ -34,7 +34,11 @@ func (n *NullRawMessage) Scan(value interface{}) error {
 		return nil
 	}
 	n.Valid = true
-	n.RawMessage = value.([]byte)
+	b, ok := value.([]byte)
+	if !ok {
+		return fmt.Errorf("cannot scan type %T into NullRawMessage", value)
+	}
+	n.RawMessage = b
 	return nil
 }
 
@@ -130,6 +134,9 @@ func (db *DB) GetActiveSignals(ctx context.Context) ([]Signal, error) {
 		}
 		signals = append(signals, s)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration error: %w", err)
+	}
 
 	return signals, nil
 }
@@ -177,6 +184,9 @@ func (db *DB) GetAllSignals(ctx context.Context, limit int, status string) ([]Si
 			return nil, fmt.Errorf("failed to scan signal: %w", err)
 		}
 		signals = append(signals, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration error: %w", err)
 	}
 
 	return signals, nil

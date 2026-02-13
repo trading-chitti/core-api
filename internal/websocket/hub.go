@@ -54,17 +54,17 @@ func (h *Hub) Run() {
 			log.Printf("👋 WebSocket client disconnected (total: %d)", len(h.clients))
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			h.mu.Lock()
 			for client := range h.clients {
 				select {
 				case client.send <- message:
 				default:
-					// Client's send channel is full, close it
-					close(client.send)
+					// Client's send channel is full, remove it
 					delete(h.clients, client)
+					close(client.send)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
